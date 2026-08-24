@@ -1,0 +1,184 @@
+import React from 'react';
+import { Star } from 'lucide-react';
+import { STATIC_ASSETS } from '../constants';
+
+export const AvatarDisplay = React.memo(({ avatar, level, customConfig, className = "w-full h-full", hideExtras = false, isOnline = false, selectedFrame, isHighestLikes = false, isHighestStreak = false }: { avatar: string, level: number, customConfig: any, className?: string, hideExtras?: boolean, isOnline?: boolean, selectedFrame?: string, isHighestLikes?: boolean, isHighestStreak?: boolean }) => {
+  const getMilestoneLevel = (lvl: number) => {
+    if (lvl >= 50) return 50;
+    if (lvl >= 40) return 40;
+    if (lvl >= 30) return 30;
+    if (lvl >= 20) return 20;
+    if (lvl >= 10) return 10;
+    return 1;
+  };
+
+  const milestoneLevel = getMilestoneLevel(level);
+
+  // Check for specific avatar replacements based on the selected avatar ID
+  let avatarReplacement = null;
+  const avatarMap: Record<string, string> = {
+    'avatar-free-boy-01.png': 'free-boy-1', 'avatar-free-boy-02.png': 'free-boy-2', 'avatar-free-boy-03.png': 'free-boy-3', 'avatar-free-boy-04.png': 'free-boy-4',
+    'avatar-free-girl-01.png': 'free-girl-1', 'avatar-free-girl-02.png': 'free-girl-2', 'avatar-free-girl-03.png': 'free-girl-3', 'avatar-free-girl-04.png': 'free-girl-4',
+    'avatar-lvl-boy-10.png': 'boy-10', 'avatar-lvl-girl-10.png': 'girl-10',
+    'avatar-lvl-boy-20.png': 'boy-20', 'avatar-lvl-girl-20.png': 'girl-20',
+    'avatar-lvl-boy-30.png': 'boy-30', 'avatar-lvl-girl-30.png': 'girl-30',
+    'avatar-lvl-boy-40.png': 'boy-40', 'avatar-lvl-girl-40.png': 'girl-40',
+  };
+  
+  if (avatarMap[avatar]) {
+    avatarReplacement = customConfig.avatars?.[avatarMap[avatar]];
+  }
+
+  const customAvatar = customConfig.avatars?.[milestoneLevel];
+  const customFrame = customConfig.frames?.[milestoneLevel];
+  const customStar = customConfig.stars?.[milestoneLevel];
+
+  const staticAvatar = !customAvatar && STATIC_ASSETS.avatars[milestoneLevel as keyof typeof STATIC_ASSETS.avatars];
+  const staticFrame = !customFrame && STATIC_ASSETS.frames[milestoneLevel as keyof typeof STATIC_ASSETS.frames];
+  const staticStar = !customStar && STATIC_ASSETS.stars[milestoneLevel as keyof typeof STATIC_ASSETS.stars];
+
+  const isFilename = typeof avatar === 'string' && (avatar.includes('.png') || avatar.includes('.webp') || avatar.includes('.jpg') || avatar.includes('.jpeg'));
+  const isDataUrl = typeof avatar === 'string' && avatar.startsWith('data:image');
+  
+  const appVersion = customConfig?.version || "1.0";
+  const appendV = (url: string | null | undefined) => {
+    if (!url || url.startsWith('data:image') || url.startsWith('http')) return url;
+    return `${url}?v=${appVersion}`;
+  };
+
+  let baseAvatar = isDataUrl ? avatar :
+                     (avatarReplacement ? `/uploads/${avatarReplacement}` :
+                     (isFilename ? (avatar.startsWith('/') ? avatar : `/assets/${avatar}`) : 
+                     (customAvatar ? `/uploads/${customAvatar}` :
+                     (staticAvatar ? `/assets/${Array.isArray(staticAvatar) ? staticAvatar[0] : staticAvatar}` : 
+                     avatar))));
+  const displayAvatar = typeof baseAvatar === 'string' && !baseAvatar.startsWith('data:') && (baseAvatar.includes('/') || baseAvatar.includes('.png') || baseAvatar.includes('.webp') || baseAvatar.includes('.jpg') || baseAvatar.includes('.jpeg')) ? appendV(baseAvatar) as string : baseAvatar;
+
+  let displayFrame = !hideExtras && (customFrame ? `/uploads/${customFrame}` : (staticFrame ? `/assets/${staticFrame}` : null));
+  if (selectedFrame && !hideExtras) {
+    displayFrame = `/assets/${selectedFrame}`;
+  }
+  displayFrame = appendV(displayFrame) as string | null;
+  
+  let displayStar = !hideExtras && (customStar ? `/uploads/${customStar}` : (staticStar ? `/assets/${staticStar}` : null));
+  displayStar = appendV(displayStar) as string | null;
+
+  const getAvatarStyle = (lvl: number) => {
+    if (lvl >= 50) return 'bg-[#fef2f2] border-black';
+    if (lvl >= 40) return 'bg-[#faf5ff] border-black';
+    if (lvl >= 30) return 'bg-[#ecfdf5] border-black';
+    if (lvl >= 20) return 'bg-[#fefce8] border-black';
+    if (lvl >= 10) return 'bg-[#e5e7eb] border-black';
+    return 'bg-white border-black';
+  };
+
+  const renderStarsFallback = (lvl: number) => {
+    if (hideExtras) return null;
+    const starsCount = Math.min(5, Math.floor(lvl / 10));
+    if (starsCount === 0) return null;
+    return (
+      <div className="absolute -inset-4 z-30 pointer-events-none overflow-hidden rounded-full">
+        <div className="absolute inset-4 animate-[spin_15s_linear_infinite]">
+          {Array.from({ length: starsCount }).map((_, i) => {
+            const angle = (i * 360) / starsCount;
+            return (
+              <div 
+                key={i} 
+                className="absolute inset-0 flex items-start justify-center"
+                style={{ transform: `rotate(${angle}deg)` }}
+              >
+                <div className="-mt-2">
+                  {displayStar ? (
+                    <img 
+                      src={displayStar} 
+                      crossOrigin="anonymous"
+                      className="w-3.5 h-3.5 object-contain drop-shadow-md" 
+                      style={{ transform: `rotate(-${angle}deg)` }} 
+                      alt="Star"
+                    />
+                  ) : (
+                    <Star 
+                      className="w-3 h-3 drop-shadow-md" 
+                      style={{ transform: `rotate(-${angle}deg)`, color: '#eab308', fill: '#eab308' }} 
+                    />
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className={`relative flex items-center justify-center ${className}`}>
+      {/* Highest Streak Fire Frame GIF Background */}
+      {isHighestStreak && (
+        <img 
+          src="/fire_frame_Higher_Streak_Number_Animation_02.gif"
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[160%] h-[160%] max-w-none object-contain pointer-events-none z-0 opacity-90"
+          alt="Highest Streak Fire"
+        />
+      )}
+
+      {/* Stars Animation Layer - Now on top of Frame */}
+      {renderStarsFallback(level)}
+
+      {/* Avatar Container */}
+      <div className={`
+        relative
+        w-full h-full 
+        rounded-full 
+        flex items-center justify-center 
+        overflow-hidden 
+        z-10
+        ${displayFrame ? 'p-1.5' : `border-4 ${getAvatarStyle(level)}`}
+      `}>
+        {displayAvatar.startsWith('data:image') || displayAvatar.startsWith('http') || displayAvatar.startsWith('/uploads/') || displayAvatar.startsWith('/assets/') ? (
+          <img src={displayAvatar} crossOrigin="anonymous" className="w-full h-full object-cover rounded-full" alt="Avatar" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-inherit font-black">{displayAvatar}</div>
+        )}
+      </div>
+
+      {/* Frame Image Layer */}
+      {displayFrame && (
+        <img 
+          src={displayFrame} 
+          crossOrigin="anonymous"
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[115%] h-[115%] max-w-none object-contain pointer-events-none z-20" 
+          alt="Frame" 
+        />
+      )}
+
+      {/* Online Indicator - Bottom Right */}
+      {isOnline && (
+        <div className="absolute bottom-[5%] right-[5%] w-[11%] h-[11%] rounded-full z-40" style={{ backgroundColor: '#22c55e' }} />
+      )}
+
+      {/* Highest Likes Indicator - Bottom Left */}
+      {isHighestLikes && (
+        <div className="absolute -bottom-2 -left-2 z-[60] pointer-events-none w-8 h-8 flex items-end justify-start">
+          <div className="relative w-full h-full">
+            {[...Array(3)].map((_, i) => (
+              <div 
+                key={`heart-${i}`}
+                className="absolute text-red-500 heart-float"
+                style={{
+                  left: `${Math.random() * 6}px`,
+                  bottom: '0px',
+                  animationDelay: `${i * 0.6}s`,
+                  fontSize: `${10 + Math.random() * 4}px`,
+                  opacity: 0,
+                }}
+              >
+                ❤️
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
