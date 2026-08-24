@@ -94,7 +94,6 @@ import { getApiBaseUrl, apiUrl, isServerlessMode, DEFAULT_CATEGORIES } from "./a
 import { MatchmakingService } from "./services/matchmakingService";
 import { GameEngineService } from "./services/gameEngineService";
 import { getServerlessSocket } from "./services/serverlessSocket";
-import { resolveGameImageUrl } from "./utils/imageFallback";
 
 const globalImageCache = new Set<string>();
 export function preloadIQImages(urls: string[]) {
@@ -770,6 +769,19 @@ function normalizeEgyptian(text: string): string {
   normalized = normalized.replace(/ژ/g, "ز");
   normalized = normalized.replace(/ڤ/g, "ف");
   return normalized;
+}
+
+function resolveGameImageUrl(urlOrPath: string | null | undefined): string {
+  if (!urlOrPath) return "";
+  if (
+    urlOrPath.startsWith("data:") ||
+    urlOrPath.startsWith("http://") ||
+    urlOrPath.startsWith("https://") ||
+    urlOrPath.startsWith("blob:")
+  ) {
+    return urlOrPath;
+  }
+  return apiUrl(urlOrPath);
 }
 
 // Helper to convert VAPID key
