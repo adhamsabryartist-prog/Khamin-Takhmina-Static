@@ -52,8 +52,22 @@ export const getApiBaseUrl = (): string => {
 };
 
 export const apiUrl = (path: string): string => {
-  const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  let cleanPath = path.startsWith('/') ? path : `/${path}`;
   
+  // In serverless / static hosting (e.g. GitHub Pages), resolve /api/image/ endpoints to static /game_images/ directory
+  if (isServerlessMode() && cleanPath.startsWith('/api/image/')) {
+    const parts = cleanPath.replace('/api/image/', '').split('/');
+    if (parts.length >= 2) {
+      const category = decodeURIComponent(parts[0]);
+      let name = decodeURIComponent(parts.slice(1).join('/'));
+      name = name.replace(/\.(jpg|jpeg|png|webp|gif|svg)$/i, '');
+      cleanPath = `/game_images/${encodeURIComponent(category)}/${encodeURIComponent(name)}.jpg`;
+    } else if (parts.length === 1 && parts[0]) {
+      let name = decodeURIComponent(parts[0]).replace(/\.(jpg|jpeg|png|webp|gif|svg)$/i, '');
+      cleanPath = `/game_images/${encodeURIComponent(name)}.jpg`;
+    }
+  }
+
   // If in browser, prepend Vite's import.meta.env.BASE_URL if it's a relative path on GitHub Pages
   if (typeof window !== 'undefined') {
     const baseUrl = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
