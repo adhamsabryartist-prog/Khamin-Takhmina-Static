@@ -24,12 +24,39 @@ export const AvatarProvider = ({ children }: { children: React.ReactNode }) => {
 
   const refreshConfig = async () => {
     try {
+      // 1. Attempt to fetch from API endpoint
       const res = await fetch(apiUrl('/api/config'));
-      const data = await res.json();
-      updateConfig(data);
-      return data;
+      const contentType = res.headers.get("content-type") || "";
+      if (res.ok && contentType.includes("application/json")) {
+        const data = await res.json();
+        updateConfig(data);
+        return data;
+      }
+      
+      // 2. If API returned non-JSON (e.g. 404/HTML on GitHub Pages), try static config.json
+      const baseUrl = import.meta.env.BASE_URL || '/';
+      const staticUrl = `${baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'}uploads/config.json`;
+      const staticRes = await fetch(staticUrl);
+      const staticContentType = staticRes.headers.get("content-type") || "";
+      if (staticRes.ok && (staticContentType.includes("application/json") || staticContentType.includes("text/plain") || !staticContentType.includes("text/html"))) {
+        const staticData = await staticRes.json();
+        updateConfig(staticData);
+        return staticData;
+      }
+      
+      return customConfig;
     } catch (err) {
-      console.error("Failed to load config:", err);
+      // Fallback silently to static file or existing config if network failed
+      try {
+        const baseUrl = import.meta.env.BASE_URL || '/';
+        const staticUrl = `${baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'}uploads/config.json`;
+        const staticRes = await fetch(staticUrl);
+        if (staticRes.ok) {
+          const staticData = await staticRes.json();
+          updateConfig(staticData);
+          return staticData;
+        }
+      } catch (e) {}
       return customConfig;
     }
   };
