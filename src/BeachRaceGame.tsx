@@ -330,9 +330,15 @@ export default function BeachRaceGame({
 
   // Load config.json on mount to index questions by ID
   useEffect(() => {
-    fetch("/uploads/config.json")
-      .then((res) => res.json())
+    const baseUrl = import.meta.env.BASE_URL || '/';
+    const configPath = `${baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'}uploads/config.json`;
+    fetch(configPath)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
+        if (!data || typeof data !== 'object') return;
         setConfigData(data);
         const map: { [id: string]: string } = {};
         const catMap: { [id: string]: string } = {};
@@ -360,7 +366,7 @@ export default function BeachRaceGame({
         setQuestionTextMap(map);
         setQuestionCategoryMap(catMap);
       })
-      .catch((err) => console.error("Error loading config.json:", err));
+      .catch((err) => console.warn("Notice: /uploads/config.json not loaded:", err.message));
   }, []);
 
   // Preload all beach environment image variations

@@ -1432,6 +1432,8 @@ export default function App() {
     const checkVersion = async () => {
       try {
         const response = await fetch(apiUrl("/api/version"));
+        const contentType = response.headers.get("content-type") || "";
+        if (!response.ok || !contentType.includes("application/json")) return;
         const data = await response.json();
         if (data.version && initialVersion && data.version !== initialVersion) {
           console.log("New version detected from API:", data.version);
@@ -1439,7 +1441,7 @@ export default function App() {
           setNeedRefresh(true);
         }
       } catch (e) {
-        console.error("Failed to check version", e);
+        // Silently ignore network / version check failures
       }
     };
 
