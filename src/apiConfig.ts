@@ -53,6 +53,15 @@ export const getApiBaseUrl = (): string => {
 
 export const apiUrl = (path: string): string => {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
+  
+  // If in browser, prepend Vite's import.meta.env.BASE_URL if it's a relative path on GitHub Pages
+  if (typeof window !== 'undefined') {
+    const baseUrl = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+    if (baseUrl && baseUrl !== '/' && baseUrl !== '.') {
+      return `${baseUrl}${cleanPath}`;
+    }
+  }
+
   const base = getApiBaseUrl();
   return `${base}${cleanPath}`;
 };
