@@ -139,6 +139,24 @@ export class GameEngineService {
   /**
    * Initialize a new room
    */
+  public static createRoom(
+    roomId: string,
+    players: any[],
+    isP2P: boolean = false,
+    p2pManager: any = null
+  ): VirtualRoom {
+    const room: VirtualRoom = {
+      id: roomId,
+      gameState: "selection",
+      timer: 30,
+      players,
+      isP2P,
+      p2pManager,
+    };
+    this.initRoom(room);
+    return room;
+  }
+
   public static initRoom(room: VirtualRoom) {
     if (this.botTimer) {
       clearInterval(this.botTimer);
