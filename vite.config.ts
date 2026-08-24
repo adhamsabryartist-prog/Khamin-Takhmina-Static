@@ -6,8 +6,10 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
+  const base = process.env.GITHUB_PAGES ? '/Khamin-Takhmina-Static/' : './';
+
   return {
-    base: 'https://adhamsabryartist-prog.github.io/Khamin-Takhmina-Static/',
+    base: base,
     plugins: [
       react(), 
       tailwindcss(),
@@ -21,9 +23,11 @@ export default defineConfig(({mode}) => {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         },
         manifest: {
-          id: '/',
+          id: base,
           name: 'خمن تخمينة',
           short_name:'خمن تخمينة',
+          start_url: base,
+          scope: base,
           description: 'منصة خمن تخمينة للألعاب الجماعية أونلاين! تضم أكثر من 13 لعبة ممتعة مثل تخمين الصور، سباق التخمين، بازل، ووردل، وأتوبيس كومبليت. العب وتحدّ أصدقائك الآن مع ألعاب جديدة باستمرار.',
           theme_color: '#ffffff',
           background_color: '#ffffff',
