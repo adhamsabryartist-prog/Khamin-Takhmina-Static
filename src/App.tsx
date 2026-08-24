@@ -90,9 +90,11 @@ import {
 
 import easyGuessData from "./data/easyGuess.json";
 import busCompleteData from "./data/busCompleteData.json";
-import { getApiBaseUrl, apiUrl } from "./apiConfig";
+import { getApiBaseUrl, apiUrl, isServerlessMode, DEFAULT_CATEGORIES } from "./apiConfig";
 import { MatchmakingService } from "./services/matchmakingService";
 import { GameEngineService } from "./services/gameEngineService";
+import { getServerlessSocket } from "./services/serverlessSocket";
+import { resolveGameImageUrl } from "./utils/imageFallback";
 
 const globalImageCache = new Set<string>();
 export function preloadIQImages(urls: string[]) {
@@ -768,19 +770,6 @@ function normalizeEgyptian(text: string): string {
   normalized = normalized.replace(/ژ/g, "ز");
   normalized = normalized.replace(/ڤ/g, "ف");
   return normalized;
-}
-
-function resolveGameImageUrl(urlOrPath: string | null | undefined): string {
-  if (!urlOrPath) return "";
-  if (
-    urlOrPath.startsWith("data:") ||
-    urlOrPath.startsWith("http://") ||
-    urlOrPath.startsWith("https://") ||
-    urlOrPath.startsWith("blob:")
-  ) {
-    return urlOrPath;
-  }
-  return apiUrl(urlOrPath);
 }
 
 // Helper to convert VAPID key
@@ -4077,10 +4066,12 @@ export default function App() {
   const [categories, setCategories] = useState<any[]>(() => {
     try {
       const cached = localStorage.getItem("khamin_categories_cache");
-      return cached ? JSON.parse(cached) : [];
-    } catch (e) {
-      return [];
-    }
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_CATEGORIES;
   });
   const [selectedCategoryLevel, setSelectedCategoryLevel] = useState<string>(
     "مستوي مبتدئين التخمين",
@@ -5344,18 +5335,30 @@ export default function App() {
           }
         }
       }
+      if (isServerlessMode()) {
+        setCategories(DEFAULT_CATEGORIES);
+        return;
+      }
       fetch(apiUrl("/api/categories"))
-        .then((res) => res.json())
+        .then((res) => {
+          if (!res.ok) throw new Error("Categories fetch not ok");
+          return res.json();
+        })
         .then((data) => {
-          if (Array.isArray(data)) {
+          if (Array.isArray(data) && data.length > 0) {
             setCategories(data);
             try {
               localStorage.setItem("khamin_categories_cache", JSON.stringify(data));
               localStorage.setItem("khamin_categories_cache_time", Date.now().toString());
             } catch (e) {}
+          } else {
+            setCategories(DEFAULT_CATEGORIES);
           }
         })
-        .catch((err) => console.error("Failed to fetch categories:", err));
+        .catch((err) => {
+          console.warn("Using default categories (Serverless/Offline):", err);
+          setCategories(DEFAULT_CATEGORIES);
+        });
     };
 
     fetchCats(false);
@@ -6663,59 +6666,73 @@ export default function App() {
     setIsConnected(false);
     setConnectionError(null);
 
-    const serverUrl = getApiBaseUrl();
-    console.log("Initializing socket connection to:", serverUrl);
-    const newSocket = io(serverUrl, {
-      transports: ["websocket"],
-      upgrade: false,
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      timeout: 20000,
-    });
-
-    
-    const originalEmit = newSocket.emit;
-    newSocket.emit = function(event: string, ...args: any[]) {
-      const room = GameEngineService.getCurrentRoom();
-      const isBotOrOffline = room?.players?.[1]?.isBot || !this.connected;
-      
-      // Events that must ALWAYS go to real server (if possible) or be ignored
-      const serverEvents = [
-        "check_ad_status", "check_key_ad_status", "update_player_notifications", 
-        "set_player_serial_for_socket", "update_player_privacy", "update_avatar",
-        "update_selected_frame", "find_random_match", "leave_matchmaking", "respond_to_match",
-        "admin_get_active_rooms", "admin_get_reward_history", "admin_get_pending_avatars",
-        "admin_get_contacts"
-      ];
-
-      if (isBotOrOffline && !serverEvents.includes(event)) {
-         console.log("[Serverless Intercept] Routing to GameEngineService:", event, args[0]);
-         GameEngineService.handleAction(event, args[0]);
-         return this as any;
+    let newSocket: any;
+    if (isServerlessMode()) {
+      console.log("[Serverless Mode] Active - initializing ServerlessSocket directly");
+      newSocket = getServerlessSocket();
+    } else {
+      const serverUrl = getApiBaseUrl();
+      console.log("Initializing socket connection to:", serverUrl);
+      try {
+        newSocket = io(serverUrl, {
+          transports: ["websocket"],
+          upgrade: false,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          timeout: 10000,
+        });
+      } catch (err) {
+        console.warn("io() initialization failed, falling back to ServerlessSocket:", err);
+        newSocket = getServerlessSocket();
       }
-      
-      return originalEmit.apply(this, [event, ...args] as any);
-    };
-    
-    
-    const originalOn = newSocket.on;
-    newSocket.on = function(event: string, fn: any) {
-      GameEngineService.on(event, fn);
-      return originalOn.apply(this, [event, fn] as any);
-    };
+    }
 
-    const originalOff = newSocket.off;
-    newSocket.off = function(event: string, fn?: any) {
-      if (fn) {
-        GameEngineService.off(event, fn);
-      }
-      return originalOff.apply(this, [event, fn] as any);
-    };
+    if (newSocket && typeof newSocket.emit === "function" && !isServerlessMode()) {
+      const originalEmit = newSocket.emit;
+      newSocket.emit = function(event: string, ...args: any[]) {
+        const room = GameEngineService.getCurrentRoom();
+        const isBotOrOffline = room?.players?.[1]?.isBot || !this.connected;
+        
+        // Events that must ALWAYS go to real server (if possible) or be ignored
+        const serverEvents = [
+          "check_ad_status", "check_key_ad_status", "update_player_notifications", 
+          "set_player_serial_for_socket", "update_player_privacy", "update_avatar",
+          "update_selected_frame", "find_random_match", "leave_matchmaking", "respond_to_match",
+          "admin_get_active_rooms", "admin_get_reward_history", "admin_get_pending_avatars",
+          "admin_get_contacts"
+        ];
+
+        if (isBotOrOffline && !serverEvents.includes(event)) {
+           console.log("[Serverless Intercept] Routing to GameEngineService:", event, args[0]);
+           GameEngineService.handleAction(event, args[0]);
+           return this as any;
+        }
+        
+        return originalEmit.apply(this, [event, ...args] as any);
+      };
+      
+      const originalOn = newSocket.on;
+      newSocket.on = function(event: string, fn: any) {
+        GameEngineService.on(event, fn);
+        return originalOn.apply(this, [event, fn] as any);
+      };
+
+      const originalOff = newSocket.off;
+      newSocket.off = function(event: string, fn?: any) {
+        if (fn) {
+          GameEngineService.off(event, fn);
+        }
+        return originalOff.apply(this, [event, fn] as any);
+      };
+    }
     
     socketRef.current = newSocket;
-
-
     setSocket(newSocket);
+
+    if (isServerlessMode()) {
+      setIsConnected(true);
+      setIsConnecting(false);
+    }
 
     newSocket.on("config_updated", () => {
       refreshConfig();
@@ -7354,12 +7371,13 @@ export default function App() {
 
     newSocket.on("connect_error", (err) => {
       if (socketRef.current !== newSocket) return;
-      console.error("Socket connection error:", err);
-      setIsConnected(false);
+      console.warn("Socket connection error, seamlessly switching to Serverless Mode:", err);
+      const serverlessSock = getServerlessSocket();
+      socketRef.current = serverlessSock as any;
+      setSocket(serverlessSock as any);
+      setIsConnected(true);
       setIsConnecting(false);
-      setConnectionError(
-        "فشل الاتصال بالخادم. يرجى التأكد من اتصالك بالإنترنت.",
-      );
+      setConnectionError(null);
     });
 
     newSocket.on("disconnect", (reason) => {
