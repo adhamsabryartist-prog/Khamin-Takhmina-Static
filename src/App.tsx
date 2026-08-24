@@ -781,23 +781,6 @@ function resolveGameImageUrl(urlOrPath: string | null | undefined): string {
   ) {
     return urlOrPath;
   }
-
-  // If path is an /api/image/category/name endpoint, convert to static disk file path
-  if (urlOrPath.startsWith("/api/image/")) {
-    const parts = urlOrPath.replace("/api/image/", "").split("/");
-    if (parts.length >= 2) {
-      const category = decodeURIComponent(parts[0]);
-      let name = decodeURIComponent(parts.slice(1).join("/"));
-      // strip extension if present
-      name = name.replace(/\.(jpg|jpeg|png|webp|gif|svg)$/i, "");
-      // Game images in public/game_images/[category]/[name].jpg
-      return apiUrl(`/game_images/${encodeURIComponent(category)}/${encodeURIComponent(name)}.jpg`);
-    } else if (parts.length === 1 && parts[0]) {
-      let name = decodeURIComponent(parts[0]).replace(/\.(jpg|jpeg|png|webp|gif|svg)$/i, "");
-      return apiUrl(`/game_images/${encodeURIComponent(name)}.jpg`);
-    }
-  }
-
   return apiUrl(urlOrPath);
 }
 
