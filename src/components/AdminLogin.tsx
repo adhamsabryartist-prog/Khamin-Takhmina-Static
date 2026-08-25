@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, AlertCircle, Loader2 } from 'lucide-react';
+import { Shield, AlertCircle, Loader2, LogOut, CheckCircle2 } from 'lucide-react';
 import { getSupabaseClient } from '../services/supabaseClient';
 
 const ADMIN_EMAIL = 'adhamsabry.co@gmail.com';
@@ -7,23 +7,42 @@ const ADMIN_EMAIL = 'adhamsabry.co@gmail.com';
 export const AdminLogin = ({ onLogin, onAdminVerified }: { onLogin: () => void; onAdminVerified?: (email: string) => void }) => {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [currentLoggedInEmail, setCurrentLoggedInEmail] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState('');
 
   useEffect(() => {
-    // Check if already authenticated via Supabase session
-    const checkSession = async () => {
-      try {
-        const supabase = getSupabaseClient();
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session?.user?.email) {
-          if (session.user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-            if (onAdminVerified) onAdminVerified(session.user.email);
-          }
+    const supabase = getSupabaseClient();
+
+    const handleSession = (session: any) => {
+      const email = session?.user?.email;
+      if (email) {
+        setCurrentLoggedInEmail(email);
+        if (email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+          setSuccessMsg('تم التحقق بنجاح! جاري فتح لوحة التحكم...');
+          setTimeout(() => {
+            if (onAdminVerified) onAdminVerified(email);
+          }, 400);
+        } else {
+          setErrorMsg(`تم تسجيل الدخول بالبريد (${email}) وهو ليس البريد المعتمد للمدير.`);
         }
-      } catch (err) {
-        console.error('Error checking auth session:', err);
       }
     };
-    checkSession();
+
+    // 1. Check existing session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      handleSession(session);
+    }).catch(err => {
+      console.error('Error checking auth session:', err);
+    });
+
+    // 2. Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      handleSession(session);
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, [onAdminVerified]);
 
   const handleGoogleLogin = async () => {
@@ -32,21 +51,42 @@ export const AdminLogin = ({ onLogin, onAdminVerified }: { onLogin: () => void; 
       setErrorMsg('');
       const supabase = getSupabaseClient();
 
+      // Ensure redirect brings user back to #admin
+      const baseUrl = window.location.href.split('#')[0].split('?')[0];
+      const redirectTo = baseUrl.endsWith('/') ? `${baseUrl}#admin` : `${baseUrl}/#admin`;
+
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: window.location.href,
+          redirectTo,
+          queryParams: {
+            prompt: 'select_account',
+          },
         },
       });
 
       if (error) {
-        // Fallback to legacy server google auth if supabase oauth not configured yet
         console.warn('Supabase OAuth error, falling back to server Google auth:', error.message);
         onLogin();
       }
     } catch (err: any) {
       console.error('Google login error:', err);
       onLogin();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      setLoading(true);
+      const supabase = getSupabaseClient();
+      await supabase.auth.signOut();
+      setCurrentLoggedInEmail(null);
+      setErrorMsg('');
+      setSuccessMsg('');
+    } catch (err) {
+      console.error('Sign out error:', err);
     } finally {
       setLoading(false);
     }
@@ -65,10 +105,29 @@ export const AdminLogin = ({ onLogin, onAdminVerified }: { onLogin: () => void; 
           <p className="text-xs text-purple-400 font-mono mt-1 font-bold">{ADMIN_EMAIL}</p>
         </div>
 
+        {successMsg && (
+          <div className="flex items-center gap-2 p-3 bg-green-500/20 border border-green-500/50 rounded-xl text-green-300 text-sm text-right">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-green-400" />
+            <span>{successMsg}</span>
+          </div>
+        )}
+
         {errorMsg && (
-          <div className="flex items-center gap-2 p-3 bg-red-500/20 border border-red-500/50 rounded-xl text-red-300 text-sm text-right">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMsg}</span>
+          <div className="p-3 bg-red-500/20 border border-red-500/50 rounded-xl text-red-300 text-xs text-right space-y-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
+            {currentLoggedInEmail && (
+              <button
+                onClick={handleSignOut}
+                disabled={loading}
+                className="w-full mt-2 py-1.5 px-3 bg-red-600/30 hover:bg-red-600/50 border border-red-500/40 rounded-lg text-white font-bold text-xs flex items-center justify-center gap-2 transition-all"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>تسجيل الخروج والتبديل لحساب آخر</span>
+              </button>
+            )}
           </div>
         )}
 
