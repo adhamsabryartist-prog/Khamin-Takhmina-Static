@@ -54,6 +54,37 @@ export const getApiBaseUrl = (): string => {
 export const apiUrl = (path: string): string => {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
   const base = getApiBaseUrl();
+
+  // If in Serverless / GitHub Pages mode and requesting an image endpoint:
+  // e.g. /api/image/animals/%D8%A3%D8%B1%D9%86%D8%A8 -> /game_images/animals/أرنب.jpg
+  if (isServerlessMode()) {
+    const baseUrl = import.meta.env.BASE_URL || '/';
+    const prefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+
+    if (cleanPath.startsWith('/api/image/')) {
+      const parts = cleanPath.replace('/api/image/', '').split('/');
+      if (parts.length >= 2) {
+        const category = decodeURIComponent(parts[0]);
+        let name = decodeURIComponent(parts.slice(1).join('/'));
+        if (!name.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
+          name = `${name}.jpg`;
+        }
+        return `${prefix}game_images/${encodeURIComponent(category)}/${encodeURIComponent(name)}`;
+      } else if (parts.length === 1) {
+        let name = decodeURIComponent(parts[0]);
+        if (!name.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
+          name = `${name}.jpg`;
+        }
+        return `${prefix}game_images/${encodeURIComponent(name)}`;
+      }
+    }
+
+    // Static assets fallback with proper BASE_URL prefix (e.g. /uploads/ or /assets/)
+    if (cleanPath.startsWith('/assets/') || cleanPath.startsWith('/uploads/') || cleanPath.startsWith('/sounds/') || cleanPath.startsWith('/game_images/')) {
+      return `${prefix}${cleanPath.replace(/^\/+/, '')}`;
+    }
+  }
+
   return `${base}${cleanPath}`;
 };
 
