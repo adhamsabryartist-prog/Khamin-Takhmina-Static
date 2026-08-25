@@ -2690,7 +2690,8 @@ export default function App() {
   const [currentPath, setCurrentPath] = useState(() => {
     const p = window.location.pathname.toLowerCase();
     const h = window.location.hash.toLowerCase();
-    return { pathname: p, hash: h };
+    const s = window.location.search.toLowerCase();
+    return { pathname: p, hash: h, search: s };
   });
 
   useEffect(() => {
@@ -2698,6 +2699,7 @@ export default function App() {
       setCurrentPath({
         pathname: window.location.pathname.toLowerCase(),
         hash: window.location.hash.toLowerCase(),
+        search: window.location.search.toLowerCase(),
       });
     };
     window.addEventListener("popstate", handleLocationChange);
@@ -2711,7 +2713,16 @@ export default function App() {
   useEffect(() => {
     const p = currentPath.pathname;
     const h = currentPath.hash;
-    const isAdminRoute = p.endsWith("/admin") || p.endsWith("/admin/") || h === "#admin" || h === "#/admin";
+    const s = currentPath.search;
+    const searchParams = new URLSearchParams(s);
+    const isAdminRoute =
+      p.endsWith("/admin") ||
+      p.endsWith("/admin/") ||
+      h === "#admin" ||
+      h === "#/admin" ||
+      searchParams.get("page") === "admin" ||
+      searchParams.get("admin") === "true" ||
+      searchParams.get("isadmin") === "true";
 
     if (isAdminRoute) {
       if (isAdmin) {
