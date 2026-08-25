@@ -1,12 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Image as ImageIcon, Trash2, Gift, CloudRain, Disc, Loader2 } from 'lucide-react';
+import { Upload, Image as ImageIcon, Trash2, Gift, CloudRain, Disc, Loader2, Database as DatabaseIcon } from 'lucide-react';
 import { useAvatarConfig } from '../contexts/AvatarContext';
 import { Socket } from 'socket.io-client';
 import { apiUrl } from '../apiConfig';
+import { getSupabaseClient } from '../services/supabaseClient';
+import initSqlJs from 'sql.js';
 
 export const AdminCustomization = ({ showAlert, socket, gamePolicies, setGamePolicies, luckyWheelEnabled, setLuckyWheelEnabled }: { showAlert: (msg: string, title?: string) => void, socket: Socket | null, gamePolicies: any, setGamePolicies: any, luckyWheelEnabled: boolean, setLuckyWheelEnabled: (val: boolean) => void }) => {
   const [uploading, setUploading] = useState(false);
   const [isSyncingDb, setIsSyncingDb] = useState(false);
+  const [isMigratingSupabase, setIsMigratingSupabase] = useState(false);
+  const [migrationProgress, setMigrationProgress] = useState<string | null>(null);
   const { customConfig: config, refreshConfig } = useAvatarConfig();
   const [versionInput, setVersionInput] = useState(config.version || '1.0.0');
 
@@ -17,6 +21,97 @@ export const AdminCustomization = ({ showAlert, socket, gamePolicies, setGamePol
   }, [config.version]);
 
   const dbFileInputRef = useRef<HTMLInputElement>(null);
+  const supabaseMigrationInputRef = useRef<HTMLInputElement>(null);
+
+  const handleMigrateToSupabase = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setIsMigratingSupabase(true);
+      setMigrationProgress('جاري قراءة ملف قاعدة البيانات...');
+
+      const arrayBuffer = await file.arrayBuffer();
+      const SQL = await initSqlJs({
+        locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
+      });
+
+      const db = new SQL.Database(new Uint8Array(arrayBuffer));
+      
+      // Check if players table exists
+      const tableCheck = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='players'");
+      if (!tableCheck.length || !tableCheck[0].values.length) {
+        throw new Error("ملف قاعدة البيانات لا يحتوي على جدول players!");
+      }
+
+      const res = db.exec("SELECT * FROM players");
+      if (!res.length || !res[0].values.length) {
+        throw new Error("جدول players فارغ في هذا الملف!");
+      }
+
+      const columns = res[0].columns;
+      const values = res[0].values;
+      const totalCount = values.length;
+
+      setMigrationProgress(`تم العثور على ${totalCount} لاعب. جاري النقل إلى Supabase...`);
+
+      const supabase = getSupabaseClient();
+      const batchSize = 100;
+      let transferred = 0;
+
+      for (let i = 0; i < totalCount; i += batchSize) {
+        const chunk = values.slice(i, i + batchSize);
+        const batchRecords = chunk.map((row) => {
+          const obj: any = {};
+          columns.forEach((col, idx) => {
+            obj[col] = row[idx];
+          });
+
+          return {
+            serial: String(obj.serial),
+            name: obj.name || "Player",
+            avatar: obj.avatar || "",
+            gender: obj.gender || "boy",
+            selected_frame: obj.selected_frame || "",
+            fingerprint: obj.fingerprint || "",
+            email: obj.email || "",
+            secret_token: obj.secret_token || "",
+            xp: Number(obj.xp) || 0,
+            wins: Number(obj.wins) || 0,
+            likes: Number(obj.likes) || 0,
+            tokens: Number(obj.tokens) || 100,
+            keys: Number(obj.keys) || 5,
+            streak: Number(obj.streak) || 0,
+            created_at: obj.created_at ? new Date(obj.created_at).toISOString() : new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        });
+
+        const { error } = await supabase.from("players").upsert(batchRecords, {
+          onConflict: "serial"
+        });
+
+        if (error) {
+          console.error("Supabase upsert error batch:", error);
+          throw new Error(error.message);
+        }
+
+        transferred += batchRecords.length;
+        setMigrationProgress(`تم نقل ${transferred} من أصل ${totalCount} لاعب (${Math.round((transferred / totalCount) * 100)}%)...`);
+      }
+
+      setMigrationProgress(null);
+      setIsMigratingSupabase(false);
+      showAlert(`تم بنجاح نقل جميع الـ ${totalCount} لاعب إلى قاعدة بيانات Supabase!`, "نجاح باهر");
+    } catch (err: any) {
+      console.error("Migration error:", err);
+      setIsMigratingSupabase(false);
+      setMigrationProgress(null);
+      showAlert(err.message || "حدث خطأ أثناء نقل البيانات", "خطأ");
+    } finally {
+      if (supabaseMigrationInputRef.current) supabaseMigrationInputRef.current.value = '';
+    }
+  };
 
   const handleSyncCloudDb = () => {
     setIsSyncingDb(true);
@@ -247,6 +342,47 @@ export const AdminCustomization = ({ showAlert, socket, gamePolicies, setGamePol
               className="btn-game bg-indigo-500 hover:bg-indigo-600 text-white py-2 px-6 shadow-[0_4px_0_0_#4f46e5] active:shadow-none active:translate-y-1"
             >
               تحميل ZIP
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between p-4 bg-gradient-to-r from-emerald-50 to-teal-50 rounded-2xl border border-emerald-200 shadow-sm">
+            <div>
+              <p className="font-bold text-emerald-900 flex items-center gap-2">
+                <DatabaseIcon className="w-5 h-5 text-emerald-600" />
+                استيراد اللاعبين مباشرة إلى Supabase
+              </p>
+              <p className="text-xs text-emerald-700 mt-1">
+                اختر ملف <code className="bg-emerald-100 px-1 rounded font-mono">players.db</code> من جهازك لنقل جميع حسابات وبيانات اللاعبين (8300+) إلى Supabase بنقرة واحدة بدون أي أوامر!
+              </p>
+              {migrationProgress && (
+                <p className="text-xs font-bold text-emerald-800 mt-2 animate-pulse">
+                  ⏳ {migrationProgress}
+                </p>
+              )}
+            </div>
+            <input
+              type="file"
+              accept=".db,application/x-sqlite3"
+              className="hidden"
+              ref={supabaseMigrationInputRef}
+              onChange={handleMigrateToSupabase}
+            />
+            <button 
+              onClick={() => supabaseMigrationInputRef.current?.click()}
+              disabled={isMigratingSupabase}
+              className={`btn-game bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 px-6 shadow-[0_4px_0_0_#047857] active:shadow-none active:translate-y-1 flex items-center gap-2 ${isMigratingSupabase ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              {isMigratingSupabase ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>جاري النقل...</span>
+                </>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>استيراد إلى Supabase</span>
+                </>
+              )}
             </button>
           </div>
 
