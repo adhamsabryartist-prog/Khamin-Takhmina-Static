@@ -2687,18 +2687,33 @@ export default function App() {
     );
   }, [luckyWheelEnabled]);
 
-  const [currentPath, setCurrentPath] = useState(window.location.pathname);
+  const [currentPath, setCurrentPath] = useState(() => {
+    const p = window.location.pathname.toLowerCase();
+    const h = window.location.hash.toLowerCase();
+    return { pathname: p, hash: h };
+  });
 
   useEffect(() => {
     const handleLocationChange = () => {
-      setCurrentPath(window.location.pathname);
+      setCurrentPath({
+        pathname: window.location.pathname.toLowerCase(),
+        hash: window.location.hash.toLowerCase(),
+      });
     };
     window.addEventListener("popstate", handleLocationChange);
-    return () => window.removeEventListener("popstate", handleLocationChange);
+    window.addEventListener("hashchange", handleLocationChange);
+    return () => {
+      window.removeEventListener("popstate", handleLocationChange);
+      window.removeEventListener("hashchange", handleLocationChange);
+    };
   }, []);
 
   useEffect(() => {
-    if (currentPath === "/admin") {
+    const p = currentPath.pathname;
+    const h = currentPath.hash;
+    const isAdminRoute = p.endsWith("/admin") || p.endsWith("/admin/") || h === "#admin" || h === "#/admin";
+
+    if (isAdminRoute) {
       if (isAdmin) {
         setShowAdminDashboard(true);
         setShowAdminLogin(false);
@@ -16584,6 +16599,16 @@ if (data.connectFourWordsRewardLevel != null) {
               className="fixed inset-0 z-[6000]"
             >
               <AdminLogin
+                onAdminVerified={(email) => {
+                  if (email.toLowerCase() === "adhamsabry.co@gmail.com") {
+                    setIsAdmin(true);
+                    setAdminEmail(email);
+                    localStorage.setItem("khamin_is_admin", "true");
+                    localStorage.setItem("khamin_admin_email", email);
+                    setShowAdminDashboard(true);
+                    setShowAdminLogin(false);
+                  }
+                }}
                 onLogin={() => {
                   fetch(apiUrl("/api/auth/google/url"))
                     .then((res) => res.json())
