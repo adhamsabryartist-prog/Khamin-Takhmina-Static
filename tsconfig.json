@@ -25,5 +25,15 @@
     "types": [
       "vite-plugin-pwa/client"
     ]
-  }
+  },
+  "include": [
+    "src",
+    "server.ts",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/*.spec.ts"
+  ]
 }
