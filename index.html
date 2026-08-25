@@ -12,7 +12,16 @@
     <link rel="manifest" href="/manifest.json" />
     <link rel="canonical" href="https://adhamsabryartist-prog.github.io/Khamin-Takhmina-Static/" />
     <title>خمن تخمينة</title>
-
+    <script>
+      (function() {
+        var redirect = sessionStorage.redirect;
+        delete sessionStorage.redirect;
+        if (redirect && redirect != location.href) {
+          history.replaceState(null, null, redirect);
+        }
+      })();
+    </script>
+    
     <!-- Google AdSense Script -->
    <script async
        data-ad-frequency-hint="30s"
