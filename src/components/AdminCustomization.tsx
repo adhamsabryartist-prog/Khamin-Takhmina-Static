@@ -4,7 +4,41 @@ import { useAvatarConfig } from '../contexts/AvatarContext';
 import { Socket } from 'socket.io-client';
 import { apiUrl } from '../apiConfig';
 import { getSupabaseClient } from '../services/supabaseClient';
-import initSqlJs from 'sql.js';
+
+declare global {
+  interface Window {
+    initSqlJs?: any;
+  }
+}
+
+const loadSqlJs = async (): Promise<any> => {
+  if (window.initSqlJs) {
+    return window.initSqlJs({
+      locateFile: (file: string) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/sql-wasm.js';
+    script.onload = async () => {
+      try {
+        if (window.initSqlJs) {
+          const SQL = await window.initSqlJs({
+            locateFile: (file: string) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
+          });
+          resolve(SQL);
+        } else {
+          reject(new Error("Failed to initialize sql.js"));
+        }
+      } catch (e) {
+        reject(e);
+      }
+    };
+    script.onerror = () => reject(new Error("Failed to load sql.js CDN script"));
+    document.head.appendChild(script);
+  });
+};
 
 export const AdminCustomization = ({ showAlert, socket, gamePolicies, setGamePolicies, luckyWheelEnabled, setLuckyWheelEnabled }: { showAlert: (msg: string, title?: string) => void, socket: Socket | null, gamePolicies: any, setGamePolicies: any, luckyWheelEnabled: boolean, setLuckyWheelEnabled: (val: boolean) => void }) => {
   const [uploading, setUploading] = useState(false);
@@ -32,9 +66,7 @@ export const AdminCustomization = ({ showAlert, socket, gamePolicies, setGamePol
       setMigrationProgress('جاري قراءة ملف قاعدة البيانات...');
 
       const arrayBuffer = await file.arrayBuffer();
-      const SQL = await initSqlJs({
-        locateFile: (file) => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.12.0/${file}`
-      });
+      const SQL = await loadSqlJs();
 
       const db = new SQL.Database(new Uint8Array(arrayBuffer));
       
