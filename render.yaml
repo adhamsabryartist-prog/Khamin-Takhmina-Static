@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: khamin-game
-    env: node
-    plan: free
-    buildCommand: npm install && npm run build
-    startCommand: node dist/server.cjs
-    maxShutdownDelaySeconds: 45
