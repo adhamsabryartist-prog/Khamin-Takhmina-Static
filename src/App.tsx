@@ -14135,5 +14135,3 @@ if (data.connectFourWordsRewardLevel != null) {
             </motion.div>
           </motion.div>
         )}
-      </Animatex�
-(J-N�KN��R }�i�U��   �� a��
