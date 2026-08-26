@@ -1,3 +1,4 @@
+import { GameEndControls } from "./components/GameEndControls";
 import React, {
   useState,
   useEffect,
@@ -10,11 +11,14 @@ import { createPortal } from "react-dom";
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { GoogleGenAI } from "@google/genai";
 import { io, Socket } from "socket.io-client";
-import { Facebook, Youtube, Instagram, Heart } from "lucide-react";
+import { Facebook, Youtube, Instagram, Heart, Hand, BellRing, RefreshCw } from "lucide-react";
 import FingerprintJS from "@fingerprintjs/fingerprintjs";
 import { motion, AnimatePresence, animate } from "motion/react";
 import {
   Upload,
+  WifiOff,
+  Box,
+  ShieldPlus,
   Trash2,
   Mail,
   User,
@@ -55,7 +59,6 @@ import {
   UserMinus,
   UserPlus,
   UserCheck,
-  RefreshCw,
   Smile,
   Loader2,
   LogOut,
@@ -86,6 +89,33 @@ import {
 } from "lucide-react";
 
 import easyGuessData from "./data/easyGuess.json";
+import busCompleteData from "./data/busCompleteData.json";
+import { getApiBaseUrl, apiUrl, isServerlessMode, DEFAULT_CATEGORIES } from "./apiConfig";
+import { MatchmakingService } from "./services/matchmakingService";
+import { GameEngineService } from "./services/gameEngineService";
+import { getServerlessSocket } from "./services/serverlessSocket";
+
+const globalImageCache = new Set<string>();
+export function preloadIQImages(urls: string[]) {
+  if (!urls || !Array.isArray(urls)) return;
+  urls.forEach((url) => {
+    if (!url || typeof url !== "string" || globalImageCache.has(url)) return;
+    globalImageCache.add(url);
+    const fullUrl = url.startsWith("http") || url.startsWith("data:") || url.startsWith("blob:") ? url : apiUrl(url);
+    const img = new Image();
+    img.src = fullUrl;
+    if (typeof img.decode === "function") {
+      img.decode().catch(() => {});
+    }
+  });
+}
+
+const limit99 = (val: number | string | undefined | null): string | number => {
+  if (val === undefined || val === null) return 0;
+  const num = typeof val === "number" ? val : parseInt(val.toString(), 10);
+  if (isNaN(num)) return val;
+  return num > 99 ? "+99" : num;
+};
 
 const SPIN_REWARDS_UI = [
   {
@@ -286,31 +316,46 @@ const SPIN_REWARDS_UI = [
   },
 ];
 
-const CategoryPageAd = () => {
-  useEffect(() => {
-    // ننتظر قليلاً حتى يستقر عرض الصفحة (DOM) لتجنب خطأ availableWidth=0
-    const timer = setTimeout(() => {
-      try {
-        if (typeof window !== "undefined" && window.adsbygoogle) {
-          (window.adsbygoogle = window.adsbygoogle || []).push({});
-        }
-      } catch (e) {
-        console.error("AdSense initialization error:", e);
-      }
-    }, 500);
+const CategoryPageAd = ({ isAdmin, isPro }: { isAdmin?: boolean; isPro?: boolean }) => {
+  const adRef = useRef<HTMLModElement>(null);
 
-    return () => clearTimeout(timer);
+  if (isAdmin || isPro) return null;
+
+  useEffect(() => {
+    let interval: any;
+    const attemptPush = () => {
+      if (adRef.current && adRef.current.clientWidth > 0) {
+        try {
+          if (typeof window !== "undefined" && window.adsbygoogle && !adRef.current.dataset.adPushed) {
+            adRef.current.dataset.adPushed = "true";
+            (window.adsbygoogle = window.adsbygoogle || []).push({});
+          }
+        } catch (e) {
+          console.error("AdSense initialization error:", e);
+        }
+        if (interval) clearInterval(interval);
+      }
+    };
+
+    interval = setInterval(attemptPush, 500);
+    const timeout = setTimeout(attemptPush, 100);
+
+    return () => {
+      if (interval) clearInterval(interval);
+      clearTimeout(timeout);
+    };
   }, []);
 
   return (
-    <div className="w-full mt-4 md:mt-4 min-h-[90px] max-h-[120px] flex flex-col items-center overflow-hidden">
+    <div className="w-full max-w-md mt-2 md:mt-2 flex flex-col items-center justify-center overflow-hidden min-h-[50px] sm:min-h-[90px]">
       <ins
-        className="adsbygoogle"
-        style={{ display: "block", width: "100%", height: "90px" }}
+        ref={adRef}
+        className="adsbygoogle w-full"
+        style={{ display: "block", minWidth: "250px" }} // تم تحديد عرض أدنى لتجنب خطأ availableWidth=0
         data-ad-client="ca-pub-8026106142955130"
         data-ad-slot="9111492892"
-        data-ad-format="horizontal"
-        data-full-width-responsive="true"
+        data-ad-format="horizontal" // إجبار الشكل الأفقي
+        data-full-width-responsive="false" // لمنع تحويل الإعلان لمربع كبير على الموبايل وإجباره على البقاء أفقيًا
       ></ins>
     </div>
   );
@@ -370,11 +415,19 @@ const SOUNDS = {
   chestOpen: "/sounds/chestOpen.mp3",
   shakingBox: "/sounds/shakingBox.mp3",
   bell: "/sounds/bell.mp3",
-  correct: "/sounds/correct.mp3",
+  correctAnswer: "/sounds/correct-answer.mp3",
+  wrong: "/sounds/wrong.mp3",
+  alarm: "/sounds/alarm.mp3",
   message: "/sounds/message.mp3",
   clickOpen: "/sounds/click-open.mp3",
   clickClose: "/sounds/click-close.mp3",
   tick: "/sounds/tick.mp3",
+  clockTicking: "/sounds/clock-ticking.mp3",
+  handXFill: "/sounds/hand-x-fill.mp3",
+  connect4Fall: "/sounds/playing-connect-4.mp3",
+  "rocket-laser-single-shoot": "/sounds/rocket-laser-single-shoot.mp3",
+  "space-war-rocket-level-upgrade": "/sounds/space-war-rocket-level-upgrade.mp3",
+  connect4PickPiece: "/sounds/connect-4-pick-piece.mp3",
   luckyReels: "/sounds/lucky-reels-sound-effect.mp3",
   spinStart: "/sounds/lucky-reels-sound-effect.mp3",
   proArrival: "/sounds/proArrival.mp3",
@@ -382,153 +435,13 @@ const SOUNDS = {
   notification: "/sounds/notification.mp3",
   lobbyBackground: "/sounds/lobby-background-music.mp3",
   gameBackground: "/sounds/start-game-background-music.mp3",
-};
-
-interface ThemeConfig {
-  bgBodyStart: string;
-  bgBodyEnd: string;
-  textMain: string;
-  textLight: string;
-  borderGame: string;
-  bgBox: string;
-  bgCard: string;
-
-  // Buttons
-  btnPrimaryBgStart: string;
-  btnPrimaryBgEnd: string;
-  btnPrimaryBorder: string;
-  btnPrimaryHover: string;
-
-  btnSecondaryBgStart: string;
-  btnSecondaryBgEnd: string;
-  btnSecondaryBorder: string;
-  btnSecondaryHover: string;
-
-  btnDangerBgStart: string;
-  btnDangerBgEnd: string;
-  btnDangerBorder: string;
-  btnDangerHover: string;
-
-  // Accents
-  accentOrange: string;
-  accentPurple: string;
-  accentBlue: string;
-  accentGreen: string;
-
-  // Shop & تخمينة
-  shopHeaderStart: string;
-  shopHeaderEnd: string;
-  shopTokenText: string;
-  shopInfoTitle: string;
-  shopWarningTitle: string;
-  shopModalBg: string;
-
-  // Text Shades
-  textMuted: string;
-  textLightAccent: string;
-  textSoft: string;
-
-  // Ranks (Bar Charts)
-  rank1BgStart: string;
-  rank1BgEnd: string;
-  rank1Border: string;
-
-  rank2BgStart: string;
-  rank2BgEnd: string;
-  rank2Border: string;
-
-  rank3BgStart: string;
-  rank3BgEnd: string;
-  rank3Border: string;
-
-  // Success Button
-  btnSuccessBgStart: string;
-  btnSuccessBgEnd: string;
-  btnSuccessBorder: string;
-  btnSuccessHover: string;
-
-  // Modal
-  modalBg: string;
-  levelBarBg: string;
-  levelBarFill: string;
-  xpBarBg: string;
-  xpBarFill: string;
-  xpBarText: string;
-  xpBarTextActive: string;
-  reportBarBg: string;
-  reportBarLow: string;
-  reportBarMedium: string;
-  reportBarHigh: string;
-}
-
-const DEFAULT_THEME: ThemeConfig = {
-  bgBodyStart: "#FFD700",
-  bgBodyEnd: "#FF8C00",
-  textMain: "#000000",
-  textLight: "#FFFFFF",
-  borderGame: "#000000",
-  bgBox: "#FFFFFF",
-  bgCard: "#FFFFFF",
-
-  btnPrimaryBgStart: "#FF3366",
-  btnPrimaryBgEnd: "#FF0033",
-  btnPrimaryBorder: "#000000",
-  btnPrimaryHover: "#FF3366",
-
-  btnSecondaryBgStart: "#00FFFF",
-  btnSecondaryBgEnd: "#00CCCC",
-  btnSecondaryBorder: "#000000",
-  btnSecondaryHover: "#00FFFF",
-
-  btnSuccessBgStart: "#00FF00",
-  btnSuccessBgEnd: "#00CC00",
-  btnSuccessBorder: "#000000",
-  btnSuccessHover: "#00FF00",
-
-  btnDangerBgStart: "#FFFF00",
-  btnDangerBgEnd: "#CCCC00",
-  btnDangerBorder: "#000000",
-  btnDangerHover: "#FFFF00",
-
-  accentOrange: "#FF3300",
-  accentPurple: "#9900FF",
-  accentBlue: "#0066FF",
-  accentGreen: "#00AA00",
-
-  shopHeaderStart: "#9900FF",
-  shopHeaderEnd: "#6600CC",
-  shopTokenText: "#000000",
-  shopInfoTitle: "#000000",
-  shopWarningTitle: "#FF0000",
-  shopModalBg: "#FFFFFF",
-
-  textMuted: "#333333",
-  textLightAccent: "#666666",
-  textSoft: "#999999",
-
-  rank1BgStart: "#FFD700",
-  rank1BgEnd: "#FFD700",
-  rank1Border: "#000000",
-
-  rank2BgStart: "#C0C0C0",
-  rank2BgEnd: "#C0C0C0",
-  rank2Border: "#000000",
-
-  rank3BgStart: "#CD7F32",
-  rank3BgEnd: "#CD7F32",
-  rank3Border: "#000000",
-
-  modalBg: "#FFFFFF",
-  levelBarBg: "#FFFFFF",
-  levelBarFill: "#0066FF",
-  xpBarBg: "#FFFFFF",
-  xpBarFill: "#FF6600",
-  xpBarText: "#000000",
-  xpBarTextActive: "#FFFFFF",
-  reportBarBg: "#FFFFFF",
-  reportBarLow: "#00FF00",
-  reportBarMedium: "#FF6600",
-  reportBarHigh: "#FF0000",
+  deskBell: "/sounds/desk-bell.mp3",
+  countdownBeep: "/sounds/countdown-beep.mp3",
+  boomSingleTick: "/sounds/boom-single-tick.mp3",
+  bombFuse: "/sounds/bomb-fuse.mp3",
+  bombExplosion: "/sounds/bomb-explosion.mp3",
+  boomingExplosion: "/sounds/booming-explosion.mp3",
+  beachRaceBackground: "/sounds/beach-race-palying-music.mp3",
 };
 
 // Types
@@ -565,21 +478,68 @@ interface Player {
   lastRenameAt?: number;
   keys?: number;
   isPro?: boolean;
+  busCompleteWins?: number;
+  xoWins?: number;
+  handWins?: number;
+  iqWins?: number;
+  dotsWins?: number;
+  speedCupsWins?: number;
+  bombPartyWins?: number;
+  wordleWins?: number;
+  connectFourWordsWins?: number;
+  spaceWarWins?: number;
+  puzzleWins?: number;
+  beachRaceWins?: number;
+  selectedSelectionMode?: string;
 }
 
 interface Room {
   id: string;
   players: Player[];
+  proposedSelectionMode?: string | null;
+  proposedSelectionModeBy?: string | null;
   gameState:
     | "waiting"
     | "discussion"
     | "guessing"
     | "finished"
-    | "custom_image_upload";
+    | "custom_image_upload"
+    | "bus_complete_setup"
+    | "bus_complete_spin"
+    | "bus_complete_playing"
+    | "bus_complete_evaluating"
+    | "xo_playing"
+    | "xo_finished"
+    | "hand_playing"
+    | "hand_finished"
+    | "bomb_party_playing"
+    | "bomb_party_finished"
+    | "space_war_setup"
+    | "space_war_playing"
+    | "space_war_finished"
+    | "puzzle_setup"
+    | "puzzle_playing"
+    | "puzzle_finished"
+    | "beach_race_setup"
+    | "beach_race_playing"
+    | "beach_race_finished";
+  bombParty?: any;
+  handGrid?: (string | null)[];
+  handPickerId?: string | null;
+  handSearcherId?: string | null;
+  handPhase?: "picking" | "searching" | string;
+  handWinner?: string | "draw" | null;
+  handP1Score?: number;
+  handP2Score?: number;
+  handRematchRequestedBy?: string[];
+  handTargetNumber?: number | null;
+  handNumbers?: any[];
+  handSearcherSelected?: number | null;
   timer: number;
   category: string;
   isPaused: boolean;
   pausingPlayerId: string | null;
+  adPausedPlayersArray?: string[];
   quickGuessTimer: number;
   isFrozen?: boolean;
   freezeTimer?: number;
@@ -590,8 +550,49 @@ interface Room {
   guessingPlayerId?: string;
   currentTurn?: string | null;
   waitingForAnswerFrom?: string | null;
-  matchType?: "random" | "private";
-  selectionMode?: "ready" | "custom" | null;
+  matchType?: "random" | "private" | "friend" | string;
+  selectionMode?: "ready" | "custom" | "bus_complete" | "xo" | "hand_khamin" | "iq" | "dots" | "speed_cups" | "bomb_party" | null;
+  busCompleteLetter?: string;
+  busCompleteWinner?: string;
+  busCompleteHideResults?: boolean;
+  busCompleteAdViewers?: string[];
+  busCompleteCooldowns?: Record<string, number>;
+  busCompleteSubmittedPlayers?: string[];
+  busCompleteSubmitTimes?: Record<string, number>;
+  busCompleteTimerReduction?: number;
+  busCompleteChangeLetterRequestBy?: string | null;
+  busCompleteRematchRequestedBy?: string[];
+  xoBoard?: (string | null)[];
+  xoTurn?: string | null;
+  xoWinner?: string | "draw" | null;
+  xoMatchWins?: { [key: string]: number };
+  xoWinningLine?: number[] | null;
+  xoRematchRequestedBy?: string[];
+  xoXPlayer?: string | null;
+  xoOPlayer?: string | null;
+  busCompleteScores?: Record<
+    string,
+    {
+      boy: number;
+      girl: number;
+      animal: number;
+      plant: number;
+      inanimate: number;
+      country: number;
+      total: number;
+    }
+  >;
+  busCompleteAnswers?: Record<
+    string,
+    {
+      boy: string;
+      girl: string;
+      animal: string;
+      plant: string;
+      inanimate: string;
+      country: string;
+    }
+  >;
 }
 
 const findNodeByText = (text: string, nodes: any[]): any | null => {
@@ -747,10 +748,15 @@ const isSameWeek = (d1: number, d2: number) => {
 };
 
 import { CheckoutPage } from "./components/CheckoutPage";
+import WordleGame from "./WordleGame";
+import ConnectFourWordsGame from "./ConnectFourWordsGame";
+import SpaceWarGame from "./SpaceWarGame";
+import PuzzleGame from "./PuzzleGame";
+import BeachRaceGame from "./BeachRaceGame";
 
 function normalizeEgyptian(text: string): string {
   if (!text) return "";
-  let normalized = text.trim();
+  let normalized = text.trim().replace(/\s+/g, " ");
   normalized = normalized.replace(/[أإآ]/g, "ا");
   normalized = normalized.replace(/ة/g, "ه");
   normalized = normalized.replace(/ى/g, "ي");
@@ -763,6 +769,19 @@ function normalizeEgyptian(text: string): string {
   normalized = normalized.replace(/ژ/g, "ز");
   normalized = normalized.replace(/ڤ/g, "ف");
   return normalized;
+}
+
+function resolveGameImageUrl(urlOrPath: string | null | undefined): string {
+  if (!urlOrPath) return "";
+  if (
+    urlOrPath.startsWith("data:") ||
+    urlOrPath.startsWith("http://") ||
+    urlOrPath.startsWith("https://") ||
+    urlOrPath.startsWith("blob:")
+  ) {
+    return urlOrPath;
+  }
+  return apiUrl(urlOrPath);
 }
 
 // Helper to convert VAPID key
@@ -991,6 +1010,326 @@ const CityImage = ({
   );
 };
 
+const SpeedCupsBoard = ({ room, socket, me, myId, onLeave, playSound }: { room: any, socket: any, me: any, myId: string, onLeave: () => void, playSound: any }) => {
+  const isP1 = room.players[0]?.id === myId;
+  const isP2 = room.players.length > 1 && room.players[1]?.id === myId;
+  
+  const myStack = isP1 ? room.speedCupsP1Stack || [] : (isP2 ? room.speedCupsP2Stack || [] : []);
+  const myDone = isP1 ? room.speedCupsP1Done : (isP2 ? room.speedCupsP2Done : false);
+  const oppStack = isP1 ? room.speedCupsP2Stack || [] : (isP2 ? room.speedCupsP1Stack || [] : []);
+  const oppDone = isP1 ? room.speedCupsP2Done : (isP2 ? room.speedCupsP1Done : false);
+  
+  const p1Wins = room.speedCupsMatchWins?.[room.players[0]?.id] || 0;
+  const p2Wins = room.players.length > 1 ? room.speedCupsMatchWins?.[room.players[1]?.id] || 0 : 0;
+  const myWins = isP1 ? p1Wins : (isP2 ? p2Wins : 0);
+  const oppWins = isP1 ? p2Wins : (isP2 ? p1Wins : 0);
+
+  const colors = ["black", "blue", "green", "red", "yellow"];
+  
+  // Local state for cup positions (shuffled at round start)
+  const [cupOrder, setCupOrder] = React.useState([...colors]);
+  const prevGameStateRef = React.useRef(room.gameState);
+
+  const [localStack, setLocalStack] = React.useState<string[]>([]);
+  const localStackRef = React.useRef<string[]>([]);
+  const isInitialSyncRef = React.useRef(true);
+
+  React.useEffect(() => {
+    isInitialSyncRef.current = true;
+  }, [room.id]);
+
+  // Sync local stack with server state
+  React.useEffect(() => {
+    const isPlaying = room.gameState === "speed_cups_playing";
+    const isReset = myStack.length === 0;
+    
+    if (!isPlaying || isReset || isInitialSyncRef.current) {
+      setLocalStack(myStack);
+      localStackRef.current = myStack;
+      isInitialSyncRef.current = false;
+    }
+  }, [JSON.stringify(myStack), room.gameState, room.speedCupsCurrentCardIndex]);
+
+  // Preload speed cups assets for zero delay/lag
+  React.useEffect(() => {
+    const staticImages = [
+      "/speed-cups/black-cup.png",
+      "/speed-cups/blue-cup.png",
+      "/speed-cups/green-cup.png",
+      "/speed-cups/red-cup.png",
+      "/speed-cups/yellow-cup.png",
+      "/speed-cups/desktop-bell-before-click.png",
+      "/speed-cups/desktop-bell-after-clicked.png",
+      "/speed-cups/cards-back.png"
+    ];
+    staticImages.forEach(src => {
+      const img = new Image();
+      img.src = src;
+    });
+
+    if (room.speedCupsCards) {
+      room.speedCupsCards.forEach((card: any) => {
+        const img = new Image();
+        img.src = `/speed-cups/${card.card_name}.png`;
+      });
+    }
+  }, [room.speedCupsCards]);
+
+  React.useEffect(() => {
+    if (room.gameState === "speed_cups_countdown" && room.speedCupsTimer === 3) {
+      setCupOrder([...colors].sort(() => Math.random() - 0.5));
+    }
+
+    if (room.gameState === "speed_cups_evaluating" && prevGameStateRef.current !== "speed_cups_evaluating") {
+      const currentCard = room.speedCupsCards?.[room.speedCupsCurrentCardIndex];
+      if (currentCard) {
+        const isCorrect = JSON.stringify(myStack) === JSON.stringify(currentCard.color_order);
+        if (isCorrect) {
+          playSound("correctAnswer");
+        } else {
+          playSound("wrong");
+        }
+      }
+    }
+    prevGameStateRef.current = room.gameState;
+  }, [room.gameState, room.speedCupsTimer, room.speedCupsCards, room.speedCupsCurrentCardIndex, myStack, playSound]);
+
+  const currentCard = room.speedCupsCards?.[room.speedCupsCurrentCardIndex];
+  
+  const handleClearStack = () => {
+    if (room.gameState === "speed_cups_playing" && !myDone && !((room.adPausedPlayersArray?.length || 0) > 0)) {
+      playSound("clickClose");
+      setLocalStack([]);
+      localStackRef.current = [];
+      socket?.emit("speed_cups_clear_cups", { roomId: room.id });
+      GameEngineService.handleAction("speed_cups_clear_cups", { roomId: room.id, playerId: socket?.id });
+    }
+  };
+
+  const renderStack = (stack: string[], done: boolean, isOpponent: boolean) => {
+    const isEvaluating = room.gameState === "speed_cups_evaluating";
+    let isCorrect = false;
+    if (isEvaluating && currentCard) {
+      isCorrect = JSON.stringify(stack) === JSON.stringify(currentCard.color_order);
+    }
+    
+    const isClickable = !isOpponent && !myDone && room.gameState === "speed_cups_playing" && stack.length > 0;
+    
+    return (
+      <div 
+        onClick={isClickable ? handleClearStack : undefined}
+        className={`flex flex-col items-center justify-end h-40 md:h-48 w-12 md:w-16 relative ${isClickable ? "cursor-pointer" : ""}`}
+      >
+        {isEvaluating && (
+          <div className="absolute -top-10 z-20 flex items-center justify-center bg-white border-2 border-pink-200 rounded-full w-10 h-10 shadow-md animate-bounce">
+            <span className="text-xl leading-none">{isCorrect ? "✔️" : "❌"}</span>
+          </div>
+        )}
+        <div className="relative w-full h-full flex flex-col justify-end">
+          {stack.map((color, idx) => (
+            <div key={idx} className="absolute w-full flex justify-center" style={{ bottom: `${idx * 14}px`, zIndex: idx }}>
+               <img src={`/speed-cups/${color}-cup.png`} className="w-10 md:w-14 h-auto object-contain" />
+            </div>
+          ))}
+        </div>
+        <span className="text-[10px] font-bold text-gray-500 mt-1">{isOpponent ? "الخصم" : "أنت"}</span>
+      </div>
+    );
+  };
+
+  if (room.gameState === "speed_cups_finished") {
+    return (
+       <div className="w-full py-4 flex flex-col items-center justify-center animate-fade-in text-center space-y-6">
+         <div className="space-y-2 mb-2">
+           <h2 className="text-xl md:text-2xl font-black text-pink-600">انتهت مباراة أكواب السرعة! 🏆</h2>
+         </div>
+
+         <div className="w-full bg-white rounded-2xl p-4 shadow-md border-2 border-pink-100 flex flex-col items-center gap-4 max-w-md mx-auto">
+           <div className="flex w-full items-center justify-center gap-4">
+             {/* Player 1 Stats */}
+             <div className="flex flex-col items-center gap-2 p-3 bg-pink-50/50 rounded-xl border-2 border-pink-100 w-1/2">
+               <div className="font-black text-base text-pink-700 truncate max-w-full px-2">
+                 {isP1 ? "أنت" : (room.players[0]?.name || "اللاعب 1").split(" ")[0]}
+               </div>
+               <div className="text-3xl font-black text-pink-600 bg-white w-full text-center py-1.5 rounded-lg border border-pink-200">
+                 {p1Wins}
+               </div>
+             </div>
+             
+             <div className="text-xl font-black text-gray-300 font-mono">VS</div>
+             
+             {/* Player 2 Stats */}
+             <div className="flex flex-col items-center gap-2 p-3 bg-gray-50 rounded-xl border-2 border-gray-200 w-1/2">
+               <div className="font-black text-base text-gray-700 truncate max-w-full px-2">
+                 {!isP1 ? "أنت" : (room.players[1]?.name || "الخصم").split(" ")[0]}
+               </div>
+               <div className="text-3xl font-black text-gray-600 bg-white w-full text-center py-1.5 rounded-lg border border-gray-200">
+                 {p2Wins}
+               </div>
+             </div>
+           </div>
+
+           <div className="text-center font-black text-base md:text-lg text-white bg-pink-500 border-b-4 border-pink-700 px-6 py-2.5 rounded-xl shadow-md w-full">
+             {room.speedCupsWinner === "draw" ? (
+               "النتيجة النهائية تعادل! 🤝"
+             ) : room.speedCupsWinner === myId ? (
+               "لقد فزت بالمباراة! 🎉"
+             ) : (
+               "حظ أوفر المرة القادمة! 😔"
+             )}
+           </div>
+
+           <GameEndControls
+             room={room}
+             socket={socket}
+             myId={myId}
+             playerSerial={localStorage.getItem("khamin_player_serial") || ""}
+             onRematch={() => {
+               socket?.emit("speed_cups_propose_rematch", { roomId: room.id });
+               GameEngineService.handleAction("speed_cups_propose_rematch", { roomId: room.id });
+             }}
+             onLeaveGame={onLeave}
+             playSound={playSound}
+           />
+         </div>
+       </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-center justify-center w-full relative select-none">
+      <div className="flex items-center justify-between w-full px-2">
+        <div className="flex flex-col items-center bg-gray-100 rounded-lg p-1.5 px-3">
+          <span className="text-[10px] text-gray-500 font-bold">نقاطك</span>
+          <span className="text-lg font-black text-pink-600">{myWins}</span>
+        </div>
+
+            {/* Cards count indicator above cards */}
+            {room.gameState !== "speed_cups_finished" && room.speedCupsCards && (
+              <div className="text-[10px] md:text-xs font-black text-pink-600 bg-pink-50 items-center h-8 flex justify-between border border-pink-200 rounded-full px-2.5 py-0.5 mb-2 whitespace-nowrap shadow-sm">
+                الكروت: {(room.speedCupsCurrentCardIndex || 0) + 1} / {room.speedCupsCards.length}
+              </div>
+            )}
+
+        <div className="flex flex-col items-center bg-gray-100 rounded-lg p-1.5 px-3">
+          <span className="text-[10px] text-gray-500 font-bold">نقاط الخصم</span>
+          <span className="text-lg font-black text-gray-700">{oppWins}</span>
+        </div>
+      </div>
+
+      {/* Main Board - Side-by-side Layout with Perfectly Aligned Center Column to Prevent Overlaps */}
+      <div className="flex flex-row items-end justify-between w-full min-h-[220px] md:min-h-[280px] mb-2">
+        {/* Right Stack (Me) */}
+        {renderStack(localStack, myDone, false)}
+        
+        {/* Center Area */}
+        <div className="flex flex-col items-center justify-between flex-1 mx-2 h-full py-1">
+          {/* Card Area */}
+          <div className="flex flex-col items-center justify-start flex-1 min-h-0 w-full">
+
+            <div className="relative flex items-center justify-center">
+              {room.gameState === "speed_cups_waiting" ? (
+                <div className="relative flex flex-col items-center">
+                  <img src="/speed-cups/cards-back.png" className="w-30 md:w-40 h-auto animate-pulse" />
+                  <div className="absolute inset-0 bg-black/45 rounded-xl flex items-center justify-center">
+                    <motion.button 
+                      onClick={() => {
+                        socket?.emit("speed_cups_start", { roomId: room.id });
+                        GameEngineService.handleAction("speed_cups_start", { roomId: room.id });
+                      }}
+                      disabled={((room.adPausedPlayersArray?.length || 0) > 0)}
+                      animate={((room.adPausedPlayersArray?.length || 0) > 0) ? {} : { scale: [1, 1.05, 1] }}
+                      transition={((room.adPausedPlayersArray?.length || 0) > 0) ? {} : { repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
+                      whileTap={{ scale: 0.95 }}
+                      whileHover={((room.adPausedPlayersArray?.length || 0) > 0) ? {} : { scale: 1.08 }}
+                      className={`font-black text-[14px] md:text-sm px-3 py-2 rounded-lg shadow-lg border-b-2 active:translate-y-0.5 active:border-b-0 whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                        ((room.adPausedPlayersArray?.length || 0) > 0)
+                        ? "bg-gray-400 text-gray-200 border-gray-600 cursor-not-allowed"
+                        : "bg-pink-500 hover:bg-pink-600 text-white border-pink-700"
+                      }`}
+                    >
+                      <span>{((room.adPausedPlayersArray?.length || 0) > 0) ? "انتظر! 📺" : "ابدأ اللعب وسحب الكروت"}</span>
+                      {!((room.adPausedPlayersArray?.length || 0) > 0) && <span className="text-base">👆</span>}
+                    </motion.button>
+                  </div>
+                </div>
+              ) : room.gameState === "speed_cups_countdown" ? (
+                <div className="relative">
+                  <img src="/speed-cups/cards-back.png" className="w-30 md:w-40 h-auto filter brightness-75" />
+                  <div className="absolute inset-0 flex items-center justify-center animate-scale-in">
+                    <div className="text-3xl md:text-4xl font-black text-white">
+                      {room.speedCupsTimer}
+                    </div>
+                  </div>
+                </div>
+              ) : (room.gameState === "speed_cups_playing" || room.gameState === "speed_cups_evaluating") ? (
+                <div className="relative animate-scale-in">
+                  <img src={`/speed-cups/${currentCard?.card_name}.png`} className="w-30 md:w-40 h-auto" />
+                  {room.gameState === "speed_cups_playing" && (
+                    <div className="absolute -top-2.5 -right-2.5 bg-red-500 text-white font-bold w-6 h-6 rounded-full flex items-center justify-center text-[10px]">
+                      {room.speedCupsTimer}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <img src="/speed-cups/cards-back.png" className="w-20 md:w-28 h-auto opacity-40 grayscale" />
+              )}
+            </div>
+          </div>
+          
+          {/* Bell Area - Positioned below card area with guaranteed vertical margin */}
+          <div className="mt-4 mb-1 flex justify-center">
+            <img 
+              src={`/speed-cups/desktop-bell-${myDone ? 'after-clicked' : 'before-click'}.png`} 
+              className={`w-20 md:w-25 h-auto cursor-pointer transition-all duration-150 ${!myDone && room.gameState === "speed_cups_playing" && !((room.adPausedPlayersArray?.length || 0) > 0) ? "active:scale-90 hover:scale-105" : "opacity-50"}`}
+              onClick={() => {
+                if (room.gameState === "speed_cups_playing" && !myDone && localStack.length === 5 && !((room.adPausedPlayersArray?.length || 0) > 0)) {
+                  playSound("deskBell");
+                  socket?.emit("speed_cups_ring_bell", { roomId: room.id });
+                  GameEngineService.handleAction("speed_cups_ring_bell", { roomId: room.id, playerId: socket?.id });
+                }
+              }}
+            />
+          </div>
+        </div>
+        
+        {/* Left Stack (Opponent) */}
+        {renderStack(oppStack, oppDone, true)}
+      </div>
+
+      {/* Cups to click */}
+      <div className="flex justify-center gap-2.5 md:gap-3 bg-pink-100 p-2 md:p-3 rounded-2xl border-2 border-gray-200 w-full relative overflow-hidden">
+        {cupOrder.map(color => {
+           const isUsed = localStack.includes(color);
+           return (
+             <button
+               key={color}
+               disabled={room.gameState !== "speed_cups_playing" || myDone || isUsed || ((room.adPausedPlayersArray?.length || 0) > 0)}
+               onClick={() => {
+                 playSound("handXFill");
+                 const currentLocalStack = localStackRef.current;
+                 if (!currentLocalStack.includes(color) && currentLocalStack.length < 5) {
+                   const newStack = [...currentLocalStack, color];
+                   localStackRef.current = newStack;
+                   setLocalStack(newStack);
+                   socket?.emit("speed_cups_click_cup", { roomId: room.id, color });
+                   GameEngineService.handleAction("speed_cups_click_cup", { roomId: room.id, color, playerId: socket?.id });
+                 }
+               }}
+               className={`transition-all ${isUsed || room.gameState !== "speed_cups_playing" || ((room.adPausedPlayersArray?.length || 0) > 0) ? 'opacity-30 grayscale cursor-not-allowed' : 'active:scale-90 hover:-translate-y-1 cursor-pointer'}`}
+             >
+               <img src={`/speed-cups/${color}-cup.png`} className="w-10 md:w-14 h-auto object-contain" />
+             </button>
+           );
+        })}
+      </div>
+      <div className="text-[9px] text-red-500 font-bold mt-1 text-center w-full">
+        اللاعب اللي يرتب الألوان ويضغط الجرس الأول يكسب الجولة!
+      </div>
+    </div>
+  );
+};
+
 let sessionAdFailuresCount = parseInt(
   localStorage.getItem("khamin_ad_failures") || "0",
 );
@@ -999,7 +1338,11 @@ export default function App() {
   const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
   const { customConfig, refreshConfig } = useAvatarConfig();
   const appVersion = customConfig.version || "1.1.1";
-  const [initialVersion, setInitialVersion] = useState<string | null>(null);
+  const [initialVersion, setInitialVersion] = useState<string | null>(() => {
+    const meta = document.querySelector('meta[name="app-version"]');
+    const v = meta?.getAttribute("content");
+    return (v && v !== "{{VERSION}}") ? v : null;
+  });
   const [needsUpdate, setNeedsUpdate] = useState(false);
   const {
     needRefresh: [needRefresh, setNeedRefresh],
@@ -1012,9 +1355,8 @@ export default function App() {
       console.log("SW registration error", error);
     },
     onNeedRefresh() {
-      // Automatically update when a new SW is available
-      console.log("[DEBUG] New SW available, updating...");
-      updateServiceWorker(true);
+      console.log("[DEBUG] New SW available, showing update banner...");
+      setNeedsUpdate(true);
     },
   });
 
@@ -1024,7 +1366,7 @@ export default function App() {
         window.adConfig({
           preloadAdBreaks: "on",
           sound: "on",
-          maxAdContentRating: "PG",
+          maxAdContentRating: "T",
           onReady: () => {
             console.log("H5 Games Ads ready");
           },
@@ -1060,6 +1402,19 @@ export default function App() {
     return String(total);
   };
 
+  useEffect(() => {
+    const lastOpenedStore = localStorage.getItem("khamin_last_opened_store");
+    if (!lastOpenedStore) {
+      setHasNewStoreOffers(true);
+    } else {
+      const lastOpenedTime = parseInt(lastOpenedStore);
+      const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+      if (Date.now() - lastOpenedTime > ONE_WEEK) {
+        setHasNewStoreOffers(true);
+      }
+    }
+  }, []);
+
   // Re-enabled version check but without forcing reloads
   useEffect(() => {
     if (
@@ -1076,7 +1431,9 @@ export default function App() {
   useEffect(() => {
     const checkVersion = async () => {
       try {
-        const response = await fetch("/api/version?t=" + Date.now());
+        const response = await fetch(apiUrl("/api/version"));
+        const contentType = response.headers.get("content-type") || "";
+        if (!response.ok || !contentType.includes("application/json")) return;
         const data = await response.json();
         if (data.version && initialVersion && data.version !== initialVersion) {
           console.log("New version detected from API:", data.version);
@@ -1084,14 +1441,13 @@ export default function App() {
           setNeedRefresh(true);
         }
       } catch (e) {
-        console.error("Failed to check version", e);
+        // Silently ignore network / version check failures
       }
     };
 
     if (initialVersion) {
-      checkVersion();
-      // Periodically check version every 5 minutes
-      const interval = setInterval(checkVersion, 5 * 60 * 1000);
+      // Periodically check version every 15 minutes (we skip immediate boot check to save bandwidth since we just fetched config)
+      const interval = setInterval(checkVersion, 15 * 60 * 1000);
       return () => clearInterval(interval);
     }
   }, [initialVersion, setNeedRefresh]);
@@ -1115,9 +1471,63 @@ export default function App() {
   }, [customConfig.version]);
 
   const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [isReadyToPlay, setIsReadyToPlay] = useState(false);
   const [isConnecting, setIsConnecting] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [showNetworkErrorModal, setShowNetworkErrorModal] = useState(false);
+  const [isJoiningRoom, setIsJoiningRoom] = useState(false);
+
+  useEffect(() => {
+    const isServerlessMode = typeof window !== 'undefined' && 
+      (window.location.hostname.includes("github.io") || 
+       !import.meta.env.VITE_SERVER_URL);
+
+    if (isConnected || isServerlessMode) {
+      const timer = setTimeout(() => {
+        setIsReadyToPlay(true);
+        if (isServerlessMode) {
+          setIsConnecting(false);
+        }
+      }, 2000);
+      return () => clearTimeout(timer);
+    } else {
+      setIsReadyToPlay(false);
+    }
+  }, [isConnected]);
+
+  useEffect(() => {
+    const isServerlessMode = typeof window !== 'undefined' && 
+      (window.location.hostname.includes("github.io") || 
+       !import.meta.env.VITE_SERVER_URL);
+
+    if (isServerlessMode) {
+      setShowNetworkErrorModal(false);
+      return;
+    }
+
+    let timeoutId: any = null;
+    const isCurrentlyDisconnected = !isConnected || isConnecting || !!connectionError;
+
+    if (isCurrentlyDisconnected) {
+      // If disconnected, wait 3 seconds before showing the modal to prevent flickering
+      timeoutId = setTimeout(() => {
+        setShowNetworkErrorModal(true);
+      }, 3000);
+    } else {
+      // If connected, hide the modal immediately
+      setShowNetworkErrorModal(false);
+    }
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, [isConnected, isConnecting, connectionError]);
+
+  const [reconnectWaitingMessage, setReconnectWaitingMessage] = useState<string | null>(null);
   const [playerName, setPlayerName] = useState(
     () => localStorage.getItem("khamin_player_name") || "",
   );
@@ -1206,6 +1616,43 @@ export default function App() {
   );
   const [keys, setKeys] = useState(
     () => parseInt(localStorage.getItem("khamin_keys") || "0") || 0,
+  );
+  const [busCompleteRewardLevel, setBusCompleteRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_bus_reward_level") || "1") || 1,
+  );
+  const [busCompleteMatchPoints, setBusCompleteMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_bus_match_points") || "0") || 0,
+  );
+
+  const [xoRewardLevel, setXoRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_xo_reward_level") || "1") || 1,
+  );
+  const [xoMatchPoints, setXoMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_xo_match_points") || "0") || 0,
+  );
+  const [iqMatchPoints, setIqMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_iq_match_points") || "0") || 0,
+  );
+  const [iqRewardLevel, setIqRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_iq_reward_level") || "1") || 1,
+  );
+  const [dotsRewardLevel, setDotsRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_dots_reward_level") || "1") || 1,
+  );
+  const [dotsMatchPoints, setDotsMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_dots_match_points") || "0") || 0,
+  );
+  const [speedCupsRewardLevel, setSpeedCupsRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_speed_cups_reward_level") || "1") || 1,
+  );
+  const [speedCupsMatchPoints, setSpeedCupsMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_speed_cups_match_points") || "0") || 0,
+  );
+  const [handRewardLevel, setHandRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_hand_reward_level") || "1") || 1,
+  );
+  const [handMatchPoints, setHandMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_hand_match_points") || "0") || 0,
   );
   const [tempItems, setTempItems] = useState<{
     keys: number;
@@ -1298,7 +1745,11 @@ export default function App() {
   }, []);
 
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
-  const [googleRegistrationData, setGoogleRegistrationData] = useState<{ email: string, name: string } | null>(null);
+  const [showWCGiftModal, setShowWCGiftModal] = useState(false);
+  const [googleRegistrationData, setGoogleRegistrationData] = useState<{
+    email: string;
+    name: string;
+  } | null>(null);
   const [showRulesModal, setShowRulesModal] = useState(false);
   const [showHowToOpenEasyGuess, setShowHowToOpenEasyGuess] = useState(false);
   const [loginSerial, setLoginSerial] = useState("");
@@ -1330,6 +1781,7 @@ export default function App() {
   const [complaintText, setComplaintText] = useState("");
   const [canSendComplaint, setCanSendComplaint] = useState(true);
   const [showShopModal, setShowShopModal] = useState(false);
+  const [hasNewStoreOffers, setHasNewStoreOffers] = useState(false);
   const [showCheckoutPage, setShowCheckoutPage] = useState(false);
   const [isInitiatingPayment, setIsInitiatingPayment] = useState(false);
   const [selectedWalletItem, setSelectedWalletItem] = useState<string | null>(
@@ -1337,6 +1789,17 @@ export default function App() {
   );
   const [showTokenInfoModal, setShowTokenInfoModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
+  const [matchAdState, setMatchAdState] = useState<{ show: boolean; timer: number; adFailed: boolean; adStarted: boolean; }>({ show: false, timer: 0, adFailed: false, adStarted: false });
+  const isOpponentWatchingAdInRoom = (roomObj: any, currentSocketId?: string, currentUserId?: string) => {
+    if (!roomObj || !roomObj.adPausedPlayersArray || roomObj.adPausedPlayersArray.length === 0) return false;
+    return roomObj.adPausedPlayersArray.some((id: string) => {
+      if (id && (id === currentSocketId || id === currentUserId)) return false;
+      const p = roomObj.players?.find((pl: any) => pl.id === id || pl.socketId === id || pl.serial === id);
+      return p && !p.isBot;
+    });
+  };
+  const matchesPlayedRef = useRef(0);
+  const previousGameStateRef = useRef<string | null>(null);
   const [activePowerUp, setActivePowerUp] = useState<string | null>(null);
   const [hasWatchedCategoryAd, setHasWatchedCategoryAd] = useState(false);
   const [isWatchingCategoryAd, setIsWatchingCategoryAd] = useState(false);
@@ -1354,6 +1817,11 @@ export default function App() {
 
   const [hideFriendRequests, setHideFriendRequests] = useState(() => {
     const saved = localStorage.getItem("khamin_hide_friend_requests");
+    return saved !== null ? saved === "true" : false;
+  });
+
+  const [disableGuessChat, setDisableGuessChat] = useState(() => {
+    const saved = localStorage.getItem("khamin_disable_guess_chat");
     return saved !== null ? saved === "true" : false;
   });
 
@@ -1386,8 +1854,16 @@ export default function App() {
     canWatch: false,
     loading: true,
   });
+  const [keyAdStatus, setKeyAdStatus] = useState({
+    adsWatched: 0,
+    maxAds: 5,
+    canWatch: false,
+    loading: true,
+  });
   const [isCooldown, setIsCooldown] = useState(false);
   const [cooldownTime, setCooldownTime] = useState(0);
+  const [isKeyCooldown, setIsKeyCooldown] = useState(false);
+  const [keyCooldownTime, setKeyCooldownTime] = useState(0);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -1402,11 +1878,28 @@ export default function App() {
   }, [isCooldown, cooldownTime]);
 
   useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (isKeyCooldown && keyCooldownTime > 0) {
+      timer = setInterval(() => {
+        setKeyCooldownTime((prev) => prev - 1);
+      }, 1000);
+    } else if (keyCooldownTime === 0) {
+      setIsKeyCooldown(false);
+    }
+    return () => clearInterval(timer);
+  }, [isKeyCooldown, keyCooldownTime]);
+
+  useEffect(() => {
     if (socket && isConnected && playerSerial) {
       socket.emit("check_ad_status", { serial: playerSerial });
+      socket.emit("check_key_ad_status", { serial: playerSerial });
 
       socket.on("ad_status", (status) => {
         setAdStatus({ ...status, loading: false });
+      });
+
+      socket.on("key_ad_status", (status) => {
+        setKeyAdStatus({ ...status, loading: false });
       });
 
       socket.on("ad_success", (data) => {
@@ -1419,6 +1912,17 @@ export default function App() {
         }));
         playSound("win");
         showAlert("تمت إضافة التخمينة بنجاح! 🎉", "نجاح");
+      });
+
+      socket.on("key_ad_success", (data) => {
+        localStorage.setItem("khamin_keys", data.keys.toString());
+        setKeyAdStatus((prev) => ({
+          ...prev,
+          adsWatched: data.adsWatched,
+          canWatch: data.adsWatched < data.maxAds,
+        }));
+        playSound("win");
+        showAlert("تمت إضافة المفتاح بنجاح! 🎉", "نجاح");
       });
 
       socket.on("ad_error", (msg) => {
@@ -1440,7 +1944,9 @@ export default function App() {
 
       return () => {
         socket.off("ad_status");
+        socket.off("key_ad_status");
         socket.off("ad_success");
+        socket.off("key_ad_success");
         socket.off("ad_error");
         socket.off("rain_gift_error");
       };
@@ -1745,6 +2251,14 @@ export default function App() {
   }, [socket, setNeedRefresh]);
   const [activeTooltip, setActiveTooltip] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [myLeaderboardRank, setMyLeaderboardRank] = useState<number | null>(() => {
+    try {
+      const cached = localStorage.getItem("khamin_my_rank");
+      return cached !== null ? JSON.parse(cached) : null;
+    } catch (e) {
+      return null;
+    }
+  });
   const [topPlayers, setTopPlayers] = useState<any[]>(() => {
     try {
       const cached = localStorage.getItem("khamin_top_players");
@@ -1755,7 +2269,7 @@ export default function App() {
   });
 
   const [leaderboardFilter, setLeaderboardFilter] = useState<
-    "all" | "level" | "wins" | "streak" | "likes"
+    "all" | "busComplete" | "xo" | "hand" | "iq" | "dots" | "speedCups" | "bombParty" | "wordle" | "connectFourWords" | "spaceWar" | "wins" | "streak" | "likes"
   >("all");
   const [leaderboardVisibleCount, setLeaderboardVisibleCount] = useState(10);
 
@@ -1768,8 +2282,30 @@ export default function App() {
 
   const sortedTopPlayers = useMemo(() => {
     let sorted = [...topPlayers];
-    if (leaderboardFilter === "level") {
-      sorted.sort((a, b) => (b.xp || 0) - (a.xp || 0));
+    if (leaderboardFilter === "busComplete") {
+      sorted.sort((a, b) => (b.busCompleteWins || 0) - (a.busCompleteWins || 0));
+    } else if (leaderboardFilter === "bombParty") {
+      sorted.sort((a, b) => (b.bombPartyWins || 0) - (a.bombPartyWins || 0));
+    } else if (leaderboardFilter === "xo") {
+      sorted.sort((a, b) => (b.xoWins || 0) - (a.xoWins || 0));
+    } else if (leaderboardFilter === "hand") {
+      sorted.sort((a, b) => (b.handWins || 0) - (a.handWins || 0));
+    } else if (leaderboardFilter === "iq") {
+      sorted.sort((a, b) => (b.iqWins || 0) - (a.iqWins || 0));
+    } else if (leaderboardFilter === "dots") {
+      sorted.sort((a, b) => (b.dotsWins || 0) - (a.dotsWins || 0));
+    } else if (leaderboardFilter === "speedCups") {
+      sorted.sort((a, b) => (b.speedCupsWins || 0) - (a.speedCupsWins || 0));
+    } else if (leaderboardFilter === "wordle") {
+      sorted.sort((a, b) => (b.wordleWins || 0) - (a.wordleWins || 0));
+    } else if (leaderboardFilter === "connectFourWords") {
+      sorted.sort((a, b) => (b.connectFourWordsWins || 0) - (a.connectFourWordsWins || 0));
+    } else if (leaderboardFilter === "spaceWar") {
+      sorted.sort((a, b) => (b.spaceWarWins || 0) - (a.spaceWarWins || 0));
+    } else if (leaderboardFilter === "puzzle") {
+      sorted.sort((a, b) => (b.puzzleWins || 0) - (a.puzzleWins || 0));
+    } else if (leaderboardFilter === "beachRace") {
+      sorted.sort((a, b) => (b.beachRaceWins || 0) - (a.beachRaceWins || 0));
     } else if (leaderboardFilter === "wins") {
       sorted.sort((a, b) => (b.wins || 0) - (a.wins || 0));
     } else if (leaderboardFilter === "streak") {
@@ -1800,6 +2336,10 @@ export default function App() {
     onComplete: () => void;
     onDismissed?: () => void;
   } | null>(null);
+  const [adSolveCategory, setAdSolveCategory] = useState<{
+    key: string;
+    label: string;
+  } | null>(null);
   const [showAdminDashboard, setShowAdminDashboard] = useState(false);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   const [showPackageModal, setShowPackageModal] = useState(false);
@@ -1808,9 +2348,9 @@ export default function App() {
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       // Allow any origin that ends with .run.app or is localhost to be safe, however since it's just passing tokens to current origin it's okay.
-      if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
+      if (event.data?.type === "GOOGLE_AUTH_SUCCESS") {
         const payload = event.data.payload;
-        if (payload.isAdmin === 'true') {
+        if (payload.isAdmin === "true") {
           setIsAdmin(true);
           localStorage.setItem("khamin_is_admin", "true");
           localStorage.setItem("khamin_admin_email", payload.email || "");
@@ -1819,53 +2359,73 @@ export default function App() {
         } else {
           // Regular user google login
           if (socket) {
-            socket.emit("google_login_or_register", {
-              email: payload.email,
-              name: payload.name,
-              picture: payload.picture,
-              fingerprint: localStorage.getItem("khamin_fingerprint")
-            }, (response: any) => {
-              if (response.error) {
-                showAlert(response.error, "خطأ");
-                return;
-              }
-              if (response.requiresRegistration) {
-                 setGoogleRegistrationData({ email: response.email, name: response.name });
-                 setPlayerName(response.name || "");
-                 setShowWelcomeModal(true);
-                 setShowCreateAccount(true);
-              } else {
-                const { serial, name, secretToken } = response;
-                if (serial) {
-                  setPlayerSerial(serial);
-                  setPlayerName(name);
-                  localStorage.setItem("khamin_player_serial", serial);
-                  if (secretToken) localStorage.setItem("khamin_secret_token", secretToken);
-                  localStorage.setItem("khamin_player_name", name);
-                  
-                  socket.emit("set_player_serial_for_socket", { serial, fingerprint: localStorage.getItem("khamin_fingerprint"), secretToken });
-                  setShowWelcomeModal(false);
-                  setShowCreateAccount(false);
-                  playSound("clickClose");
-                  setGoogleRegistrationData(null);
-                  
-                  socket.emit("get_player_data", { serial, fingerprint: localStorage.getItem("khamin_fingerprint"), secretToken }, (playerData: any) => {
-                    if (playerData && !playerData.error) {
-                       setPlayerName(playerData.name);
-                       setAvatar(playerData.avatar);
-                       setXp(playerData.xp || 0);
-                       if (playerData.level) setLevel(playerData.level);
-                    }
-                  });
+            socket.emit(
+              "google_login_or_register",
+              {
+                email: payload.email,
+                name: payload.name,
+                picture: payload.picture,
+                fingerprint: localStorage.getItem("khamin_fingerprint"),
+              },
+              (response: any) => {
+                if (response.error) {
+                  showAlert(response.error, "خطأ");
+                  return;
                 }
-              }
-            });
+                if (response.requiresRegistration) {
+                  setGoogleRegistrationData({
+                    email: response.email,
+                    name: response.name,
+                  });
+                  setPlayerName(response.name || "");
+                  setShowWelcomeModal(true);
+                  setShowCreateAccount(true);
+                } else {
+                  const { serial, name, secretToken } = response;
+                  if (serial) {
+                    setPlayerSerial(serial);
+                    setPlayerName(name);
+                    localStorage.setItem("khamin_player_serial", serial);
+                    if (secretToken)
+                      localStorage.setItem("khamin_secret_token", secretToken);
+                    localStorage.setItem("khamin_player_name", name);
+
+                    socket.emit("set_player_serial_for_socket", {
+                      serial,
+                      fingerprint: localStorage.getItem("khamin_fingerprint"),
+                      secretToken,
+                    });
+                    setShowWelcomeModal(false);
+                    setShowCreateAccount(false);
+
+                    playSound("clickClose");
+                    setGoogleRegistrationData(null);
+
+                    socket.emit(
+                      "get_player_data",
+                      {
+                        serial,
+                        fingerprint: localStorage.getItem("khamin_fingerprint"),
+                        secretToken,
+                      },
+                      (playerData: any) => {
+                        if (playerData && !playerData.error) {
+                          setPlayerName(playerData.name);
+                          setAvatar(playerData.avatar);
+                          setXp(playerData.xp || 0);
+                        }
+                      },
+                    );
+                  }
+                }
+              },
+            );
           }
         }
       }
     };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
   }, [socket]);
 
   useEffect(() => {
@@ -1992,13 +2552,11 @@ export default function App() {
     | "images"
     | "customization"
     | "shop"
-    | "colors"
     | "announcements"
     | "rewards"
     | "policies"
     | "avatar_review"
     | "contacts"
-    | "live_matches"
     | "quick_chat"
   >("players");
   const [rewardHistory, setRewardHistory] = useState<any[]>([]);
@@ -2013,11 +2571,22 @@ export default function App() {
 
   const [spectatingRoomId, setSpectatingRoomId] = useState<string | null>(null);
   const spectatingRoomIdRef = useRef<string | null>(null);
+  const spectatorChatEndRef = useRef<HTMLDivElement>(null);
+  const [spectatorRoomData, setSpectatorRoomData] = useState<any>(null);
 
   const updateSpectatingRoomId = (id: string | null) => {
     setSpectatingRoomId(id);
     spectatingRoomIdRef.current = id;
   };
+
+  useEffect(() => {
+    if (spectatorChatEndRef.current) {
+      const parent = spectatorChatEndRef.current.parentElement;
+      if (parent) {
+        parent.scrollTop = parent.scrollHeight;
+      }
+    }
+  }, [spectatorRoomData?.chatHistory]);
 
   useEffect(() => {
     if (spectatingRoomId && activeRooms.length === 0 && socket) {
@@ -2026,7 +2595,6 @@ export default function App() {
       });
     }
   }, [spectatingRoomId, socket, activeRooms.length]);
-  const [spectatorRoomData, setSpectatorRoomData] = useState<any>(null);
   const [pendingAvatars, setPendingAvatars] = useState<
     { serial: string; name: string; level: number; pendingAvatar: string }[]
   >([]);
@@ -2119,29 +2687,44 @@ export default function App() {
     );
   }, [luckyWheelEnabled]);
 
-  const [themeConfig, setThemeConfig] = useState<ThemeConfig>(() => {
-    const saved = localStorage.getItem("khamin_theme_config");
-    if (saved) {
-      try {
-        return { ...DEFAULT_THEME, ...JSON.parse(saved) };
-      } catch (e) {
-        return DEFAULT_THEME;
-      }
-    }
-    return DEFAULT_THEME;
+  const [currentPath, setCurrentPath] = useState(() => {
+    const p = window.location.pathname.toLowerCase();
+    const h = window.location.hash.toLowerCase();
+    const s = window.location.search.toLowerCase();
+    return { pathname: p, hash: h, search: s };
   });
-  const [currentPath, setCurrentPath] = useState(window.location.pathname);
 
   useEffect(() => {
     const handleLocationChange = () => {
-      setCurrentPath(window.location.pathname);
+      setCurrentPath({
+        pathname: window.location.pathname.toLowerCase(),
+        hash: window.location.hash.toLowerCase(),
+        search: window.location.search.toLowerCase(),
+      });
     };
     window.addEventListener("popstate", handleLocationChange);
-    return () => window.removeEventListener("popstate", handleLocationChange);
+    window.addEventListener("hashchange", handleLocationChange);
+    return () => {
+      window.removeEventListener("popstate", handleLocationChange);
+      window.removeEventListener("hashchange", handleLocationChange);
+    };
   }, []);
 
   useEffect(() => {
-    if (currentPath === "/admin") {
+    const p = currentPath.pathname;
+    const h = currentPath.hash;
+    const s = currentPath.search;
+    const searchParams = new URLSearchParams(s);
+    const isAdminRoute =
+      p.endsWith("/admin") ||
+      p.endsWith("/admin/") ||
+      h === "#admin" ||
+      h === "#/admin" ||
+      searchParams.get("page") === "admin" ||
+      searchParams.get("admin") === "true" ||
+      searchParams.get("isadmin") === "true";
+
+    if (isAdminRoute) {
       if (isAdmin) {
         setShowAdminDashboard(true);
         setShowAdminLogin(false);
@@ -2154,122 +2737,6 @@ export default function App() {
       setShowAdminLogin(false);
     }
   }, [currentPath, isAdmin]);
-
-  useEffect(() => {
-    localStorage.setItem("khamin_theme_config", JSON.stringify(themeConfig));
-    const root = document.documentElement;
-    root.style.setProperty("--bg-body-start", themeConfig.bgBodyStart);
-    root.style.setProperty("--bg-body-end", themeConfig.bgBodyEnd);
-    root.style.setProperty("--text-main", themeConfig.textMain);
-    root.style.setProperty("--text-light", themeConfig.textLight);
-    root.style.setProperty("--border-game", themeConfig.borderGame);
-    root.style.setProperty("--bg-box", themeConfig.bgBox);
-    root.style.setProperty("--bg-card", themeConfig.bgCard);
-
-    // Primary Button
-    root.style.setProperty(
-      "--btn-primary-bg-start",
-      themeConfig.btnPrimaryBgStart,
-    );
-    root.style.setProperty("--btn-primary-bg-end", themeConfig.btnPrimaryBgEnd);
-    root.style.setProperty(
-      "--btn-primary-border",
-      themeConfig.btnPrimaryBorder,
-    );
-    root.style.setProperty("--btn-primary-hover", themeConfig.btnPrimaryHover);
-
-    // Secondary Button
-    root.style.setProperty(
-      "--btn-secondary-bg-start",
-      themeConfig.btnSecondaryBgStart,
-    );
-    root.style.setProperty(
-      "--btn-secondary-bg-end",
-      themeConfig.btnSecondaryBgEnd,
-    );
-    root.style.setProperty(
-      "--btn-secondary-border",
-      themeConfig.btnSecondaryBorder,
-    );
-    root.style.setProperty(
-      "--btn-secondary-hover",
-      themeConfig.btnSecondaryHover,
-    );
-
-    // Success Button
-    root.style.setProperty(
-      "--btn-success-bg-start",
-      themeConfig.btnSuccessBgStart,
-    );
-    root.style.setProperty("--btn-success-bg-end", themeConfig.btnSuccessBgEnd);
-    root.style.setProperty(
-      "--btn-success-border",
-      themeConfig.btnSuccessBorder,
-    );
-    root.style.setProperty("--btn-success-hover", themeConfig.btnSuccessHover);
-
-    // Modal
-    root.style.setProperty("--bg-modal", themeConfig.modalBg);
-
-    // Progress Bars
-    root.style.setProperty("--level-bar-bg", themeConfig.levelBarBg);
-    root.style.setProperty("--level-bar-fill", themeConfig.levelBarFill);
-    root.style.setProperty("--xp-bar-bg", themeConfig.xpBarBg);
-    root.style.setProperty("--xp-bar-fill", themeConfig.xpBarFill);
-    root.style.setProperty("--xp-bar-text", themeConfig.xpBarText);
-    root.style.setProperty("--xp-bar-text-active", themeConfig.xpBarTextActive);
-    root.style.setProperty("--report-bar-bg", themeConfig.reportBarBg);
-    root.style.setProperty("--report-bar-low", themeConfig.reportBarLow);
-    root.style.setProperty("--report-bar-medium", themeConfig.reportBarMedium);
-    root.style.setProperty("--report-bar-high", themeConfig.reportBarHigh);
-
-    // Danger Button
-    root.style.setProperty(
-      "--btn-danger-bg-start",
-      themeConfig.btnDangerBgStart,
-    );
-    root.style.setProperty("--btn-danger-bg-end", themeConfig.btnDangerBgEnd);
-    root.style.setProperty("--btn-danger-border", themeConfig.btnDangerBorder);
-    root.style.setProperty("--btn-danger-hover", themeConfig.btnDangerHover);
-
-    // Accents
-    root.style.setProperty("--color-accent-orange", themeConfig.accentOrange);
-    root.style.setProperty("--color-accent-purple", themeConfig.accentPurple);
-    root.style.setProperty("--color-accent-blue", themeConfig.accentBlue);
-    root.style.setProperty("--color-accent-green", themeConfig.accentGreen);
-
-    // Also set these for backgrounds and borders if needed by CSS classes
-    // Note: The CSS classes .bg-accent-orange use var(--color-accent-orange) directly,
-    // so we don't need separate variables unless we want different shades.
-
-    // Text Shades
-    root.style.setProperty("--text-muted", themeConfig.textMuted);
-    root.style.setProperty("--text-light-accent", themeConfig.textLightAccent);
-    root.style.setProperty("--text-soft", themeConfig.textSoft);
-
-    // Ranks
-    root.style.setProperty("--rank-1-bg-start", themeConfig.rank1BgStart);
-    root.style.setProperty("--rank-1-bg-end", themeConfig.rank1BgEnd);
-    root.style.setProperty("--rank-1-border", themeConfig.rank1Border);
-
-    root.style.setProperty("--rank-2-bg-start", themeConfig.rank2BgStart);
-    root.style.setProperty("--rank-2-bg-end", themeConfig.rank2BgEnd);
-    root.style.setProperty("--rank-2-border", themeConfig.rank2Border);
-
-    root.style.setProperty("--rank-3-bg-start", themeConfig.rank3BgStart);
-    root.style.setProperty("--rank-3-bg-end", themeConfig.rank3BgEnd);
-    root.style.setProperty("--rank-3-border", themeConfig.rank3Border);
-
-    root.style.setProperty("--shop-header-start", themeConfig.shopHeaderStart);
-    root.style.setProperty("--shop-header-end", themeConfig.shopHeaderEnd);
-    root.style.setProperty("--shop-token-text", themeConfig.shopTokenText);
-    root.style.setProperty("--shop-info-title", themeConfig.shopInfoTitle);
-    root.style.setProperty(
-      "--shop-warning-title",
-      themeConfig.shopWarningTitle,
-    );
-    root.style.setProperty("--shop-modal-bg", themeConfig.shopModalBg);
-  }, [themeConfig]);
 
   useEffect(() => {
     if (adminTab === "rewards" && isAdmin) {
@@ -2763,6 +3230,18 @@ export default function App() {
 
   const [roomId, setRoomId] = useState("");
   const [room, setRoom] = useState<Room | null>(null);
+  const [bombExplosionFrame, setBombExplosionFrame] = useState<number | null>(null);
+
+
+  
+  const [handPickerLocalSelected, setHandPickerLocalSelected] = useState<number | null>(null);
+  useEffect(() => {
+    if (room?.handPhase !== "picking") {
+      setHandPickerLocalSelected(null);
+    }
+  }, [room?.handPhase]);
+  const [shakeBell, setShakeBell] = useState(false);
+
   const [privateCategoryMode, setPrivateCategoryMode] = useState<
     null | "ready" | "custom"
   >(null);
@@ -2777,7 +3256,6 @@ export default function App() {
     type: "quick" | "final";
     playerId: string;
   } | null>(null);
-  const [proAnnouncedFor, setProAnnouncedFor] = useState<string[]>([]);
   const [proAnnouncement, setProAnnouncement] = useState<{
     name: string;
     type: "joined" | "found";
@@ -2805,19 +3283,20 @@ export default function App() {
   ]);
   const askedQuickChatNodeRef = useRef<any | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const proAnnouncedForRef = useRef<string[]>([]);
 
   const [isSendingQuestion, setIsSendingQuestion] = useState(false);
 
   useEffect(() => {
     if (!room) {
-      setProAnnouncedFor([]);
-      setProAnnouncement(null);
+      proAnnouncedForRef.current = [];
+      setProAnnouncement((prev) => (prev !== null ? null : prev));
       return;
     }
 
     if (room && room.players) {
       if (room.gameState === "finished") {
-        setProAnnouncedFor([]);
+        proAnnouncedForRef.current = [];
       } else {
         // Trigger condition based on match type:
         // - Random: show when found
@@ -2831,11 +3310,11 @@ export default function App() {
             (p) =>
               p.id !== socket?.id &&
               p.isPro &&
-              !proAnnouncedFor.includes(`${room.id}-${p.serial}`),
+              !proAnnouncedForRef.current.includes(`${room.id}-${p.serial}`),
           );
           if (newPros.length > 0 && !proAnnouncement) {
             const p = newPros[0];
-            setProAnnouncedFor((prev) => [...prev, `${room.id}-${p.serial}`]);
+            proAnnouncedForRef.current.push(`${room.id}-${p.serial}`);
             setProAnnouncement({
               name: p.name,
               type: room.matchType === "random" ? "found" : "joined",
@@ -2846,7 +3325,7 @@ export default function App() {
         }
       }
     }
-  }, [room, proAnnouncedFor, proAnnouncement]);
+  }, [room, proAnnouncement, socket?.id]);
 
   useEffect(() => {
     if (
@@ -2898,26 +3377,25 @@ export default function App() {
 
   const [joined, setJoined] = useState(false);
 
+  useEffect(() => {
+    // Clear any reconnection waiting messages when joining/leaving rooms or transitioning to a new room ID
+    setReconnectWaitingMessage(null);
+  }, [joined, room?.id]);
+
   const [isAppLoading, setIsAppLoading] = useState(true);
   const [isMaintenanceMode, setIsMaintenanceMode] = useState(false);
   useEffect(() => {
-    if (isAdmin) {
+    if (isAdmin && showAdminDashboard && adminTab === "notifications") {
       const fetchPushStats = async () => {
         try {
           const token = localStorage.getItem("khamin_admin_token");
-          if (!token) {
-            console.log("No admin token found in localStorage");
-            return;
-          }
-          console.log("Fetching push stats with token...");
-          const response = await fetch(`/api/admin/push-stats?token=${token}`);
+          if (!token) return;
+          const response = await fetch(apiUrl(`/api/admin/push-stats?token=${token}`));
           if (!response.ok) {
-            console.error("Push stats API failed:", response.status);
             setPushStatsError(`خطأ في جلب البيانات (${response.status})`);
             return;
           }
           const data = await response.json();
-          console.log("Push stats received:", data);
           if (data.count !== undefined) {
             setPushStats({
               count: data.count,
@@ -2925,16 +3403,14 @@ export default function App() {
             });
             setPushStatsError(null);
           } else {
-            console.warn("Push stats response missing count:", data);
             setPushStatsError("بيانات غير مكتملة");
           }
         } catch (err) {
-          console.error("Error fetching push stats:", err);
           setPushStatsError("خطأ في الاتصال");
         }
       };
       fetchPushStats();
-      const interval = setInterval(fetchPushStats, 30000); // Update every 30s
+      const interval = setInterval(fetchPushStats, 60000);
       return () => clearInterval(interval);
     }
   }, [isAdmin, showAdminDashboard, adminTab]);
@@ -2960,7 +3436,7 @@ export default function App() {
     if (!adminToken) return;
     try {
       const res = await fetch(
-        `/api/push/scheduled?adminToken=${adminToken}&t=${Date.now()}`,
+        apiUrl(`/api/push/scheduled?adminToken=${adminToken}&t=${Date.now()}`),
         {
           headers: {
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -3027,11 +3503,16 @@ export default function App() {
       return;
     }
 
+    const currentSerial = playerSerial || localStorage.getItem("khamin_player_serial");
+    if (!force && localStorage.getItem("khamin_push_synced") === currentSerial) {
+      return; // Already registered and synced
+    }
+
     try {
       const registration = await navigator.serviceWorker.ready;
 
       // Get public key from server
-      const response = await fetch("/api/push/public-key");
+      const response = await fetch(apiUrl("/api/push/public-key"));
       const { publicKey } = await response.json();
 
       const subscription = await registration.pushManager.subscribe({
@@ -3042,20 +3523,23 @@ export default function App() {
       // If we got here, subscription was successful (user clicked "Allow" in browser prompt)
       setNotificationsEnabled(true);
       localStorage.setItem("khamin_notifications_enabled", "true");
+      if (currentSerial) {
+        localStorage.setItem("khamin_push_synced", currentSerial);
+      }
 
       // Send subscription to server
-      await fetch("/api/push/subscribe", {
+      await fetch(apiUrl("/api/push/subscribe"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          serial: playerSerial,
+          serial: currentSerial,
           subscription,
         }),
       });
 
-      if (socket && isConnected) {
+      if (socket && isConnected && currentSerial) {
         socket.emit("update_player_notifications", {
-          serial: playerSerial,
+          serial: currentSerial,
           enabled: true,
         });
       }
@@ -3065,8 +3549,24 @@ export default function App() {
       if (force) {
         showAlert("تم تفعيل إشعارات الهاتف بنجاح! 🔔", "نجاح");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to subscribe to push:", err);
+      // If it's a DOMException or applicationServerKey mismatch, try to unsubscribe first then resubscribe
+      if (err.name === 'InvalidStateError' || err.message?.includes('mismatch')) {
+        try {
+           const registration = await navigator.serviceWorker.ready;
+           const existingSub = await registration.pushManager.getSubscription();
+           if (existingSub) {
+             await existingSub.unsubscribe();
+             // Retry once silently
+             if (!force) subscribeToPush(true);
+             return;
+           }
+        } catch (e) {
+           console.error("Failed to recover from push subscription error:", e);
+        }
+      }
+      
       if (force) {
         showAlert("فشل تفعيل الإشعارات. يرجى المحاولة مرة أخرى.", "خطأ");
       }
@@ -3082,19 +3582,23 @@ export default function App() {
 
       if (subscription) {
         await subscription.unsubscribe();
+        localStorage.removeItem("khamin_push_synced");
+        
+        const currentSerial = playerSerial || localStorage.getItem("khamin_player_serial");
+        
         // Notify server to remove subscription
-        await fetch("/api/push/unsubscribe", {
+        await fetch(apiUrl("/api/push/unsubscribe"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            serial: playerSerial,
+            serial: currentSerial,
             subscription,
           }),
         });
 
-        if (socket && isConnected) {
+        if (socket && isConnected && currentSerial) {
           socket.emit("update_player_notifications", {
-            serial: playerSerial,
+            serial: currentSerial,
             enabled: false,
           });
         }
@@ -3149,13 +3653,42 @@ export default function App() {
         serial: playerSerial,
         hideFriendRequests: newValue,
       });
+    } 
+  };
+
+  const toggleDisableGuessChat = () => {
+    const newValue = !disableGuessChat;
+    setDisableGuessChat(newValue);
+    playSound("clickOpen");
+    localStorage.setItem("khamin_disable_guess_chat", newValue.toString());
+    if (socket && isConnected) {
+      socket.emit("update_player_privacy", {
+        serial: playerSerial,
+        disableGuessChat: newValue,
+      });
     }
   };
 
-  const [playerCollection, setPlayerCollection] = useState<any[]>([]);
-  const [claimedCollectionRewards, setClaimedCollectionRewards] = useState<
-    any[]
-  >([]);
+  const [playerCollection, setPlayerCollection] = useState<any[]>(() => {
+    try {
+      const serial = localStorage.getItem("khamin_player_serial");
+      if (serial) {
+        const cached = localStorage.getItem(`khamin_collection_cache_${serial}`);
+        return cached ? JSON.parse(cached) : [];
+      }
+    } catch (e) {}
+    return [];
+  });
+  const [claimedCollectionRewards, setClaimedCollectionRewards] = useState<any[]>(() => {
+    try {
+      const serial = localStorage.getItem("khamin_player_serial");
+      if (serial) {
+        const cached = localStorage.getItem(`khamin_claimed_cache_${serial}`);
+        return cached ? JSON.parse(cached) : [];
+      }
+    } catch (e) {}
+    return [];
+  });
   const [seenCategoryCounts, setSeenCategoryCounts] = useState<
     Record<string, number>
   >(() => {
@@ -3243,7 +3776,11 @@ export default function App() {
           (r) => r.category_id === categoryId && r.stage === 2,
         );
 
-        if (!ownsFrame && playerSerial) {
+        const now = new Date();
+        const WC_END_DATE = new Date("2026-07-20T00:00:00Z");
+        const isWCGiftActive = selectedFrame === "football-category-frame-gift.png" && now <= WC_END_DATE;
+
+        if (!ownsFrame && !isWCGiftActive && playerSerial) {
           setSelectedFrame("");
           localStorage.setItem("khamin_player_frame", "");
           socket?.emit("update_selected_frame", { playerSerial, frame: "" });
@@ -3251,6 +3788,60 @@ export default function App() {
       }
     }
   }, [xp, selectedFrame, claimedCollectionRewards, playerSerial, socket]);
+
+  // World Cup Gift Logic
+  useEffect(() => {
+    if (playerName && !showWelcomeModal) {
+      const now = new Date();
+      const WC_END_DATE = new Date("2026-07-20T00:00:00Z");
+      
+      if (now > WC_END_DATE && selectedFrame === "football-category-frame-gift.png" && playerSerial) {
+        // Enforce expiration if they had it equipped as a gift
+        let categoryId = null;
+        for (const [id, data] of Object.entries(COLLECTION_DATA)) {
+          if (data.stages.some((s) => s.reward?.frame === selectedFrame)) {
+            categoryId = id;
+            break;
+          }
+        }
+        const ownsFrame = claimedCollectionRewards.some(
+          (r) => r.category_id === categoryId && r.stage === 2,
+        );
+        if (!ownsFrame) {
+          const prevFrame = localStorage.getItem("khamin_previous_frame_before_wc") || "";
+          setSelectedFrame(prevFrame);
+          localStorage.setItem("khamin_player_frame", prevFrame);
+          socket?.emit("update_selected_frame", { playerSerial, frame: prevFrame });
+        }
+      }
+    }
+  }, [playerName, showWelcomeModal, selectedFrame, claimedCollectionRewards, playerSerial, socket]);
+
+  const handleClaimWCGift = () => {
+    localStorage.setItem(`wc_gift_claimed_2026_${playerSerial}`, "true");
+    if (selectedFrame !== "football-category-frame-gift.png") {
+      localStorage.setItem("khamin_previous_frame_before_wc", selectedFrame || "");
+    }
+    
+    const newFrame = "football-category-frame-gift.png";
+    setSelectedFrame(newFrame);
+    localStorage.setItem("khamin_player_frame", newFrame);
+    if (playerSerial) {
+      socket?.emit("update_selected_frame", { playerSerial, frame: newFrame });
+    }
+    
+    playSound("clickClose");
+    setShowWCGiftModal(false);
+    setTimeout(checkAndShowNextModal, 300);
+  };
+
+  const handleDeclineWCGift = () => {
+    localStorage.setItem(`wc_gift_claimed_2026_${playerSerial}`, "true");
+    playSound("clickClose");
+    setShowWCGiftModal(false);
+    setTimeout(checkAndShowNextModal, 300);
+  };
+
 
   useEffect(() => {
     if (!showPlayerSearchModal) {
@@ -3293,8 +3884,22 @@ export default function App() {
 
   const [showFriendsModal, setShowFriendsModal] = useState(false);
   const [friendSearchQuery, setFriendSearchQuery] = useState("");
-  const [friendsList, setFriendsList] = useState<any[]>([]);
-  const [friendsTotal, setFriendsTotal] = useState(0);
+  const [friendsList, setFriendsList] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem("khamin_friends_list");
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [friendsTotal, setFriendsTotal] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("khamin_friends_total");
+      return saved ? parseInt(saved, 10) || 0 : 0;
+    } catch (e) {
+      return 0;
+    }
+  });
   const [friendsPage, setFriendsPage] = useState(1);
   const [friendsLoading, setFriendsLoading] = useState(false);
   const [friendRequests, setFriendRequests] = useState<any[]>([]);
@@ -3405,54 +4010,76 @@ export default function App() {
   }, []);
 
   // Poll friends list for online status
+  const friendsListLengthRef = useRef(friendsList.length);
+  useEffect(() => {
+    friendsListLengthRef.current = friendsList.length;
+  }, [friendsList.length]);
+
   useEffect(() => {
     if (socket && playerSerial) {
-      const pollRate = showFriendsModal ? 5000 : 35000;
-      const interval = setInterval(() => {
+      const fetchFriends = () => {
+        const fetchLimit = showFriendsModal
+          ? Math.max(10, friendsListLengthRef.current)
+          : 10;
         socket.emit(
           "get_friends",
-          { serial: playerSerial, limit: Math.max(10, friendsList.length) },
+          { serial: playerSerial, limit: fetchLimit },
           (res: any) => {
             if (res.success) {
               setFriendsList(res.friends || []);
               setFriendsTotal(res.total || 0);
+              localStorage.setItem("khamin_friends_list", JSON.stringify(res.friends || []));
+              localStorage.setItem("khamin_friends_total", (res.total || 0).toString());
             }
           },
         );
-      }, pollRate);
+      };
+
+      // Fetch immediately on mount / dependency changes to avoid any delay!
+      fetchFriends();
+
+      const pollRate = showFriendsModal ? 15000 : 60000;
+      const interval = setInterval(fetchFriends, pollRate);
       return () => clearInterval(interval);
     }
-  }, [socket, playerSerial, friendsList.length, showFriendsModal]);
+  }, [socket, playerSerial, showFriendsModal]);
 
   // Load Friends Effect
   useEffect(() => {
     if (
       socket &&
       playerSerial &&
-      showFriendsModal &&
-      friendsList.length === (friendsPage - 1) * 10
+      showFriendsModal
     ) {
-      setFriendsLoading(true);
-      socket.emit(
-        "get_friends",
-        { serial: playerSerial, page: friendsPage },
-        (res: any) => {
-          if (res.success) {
-            if (friendsPage === 1) {
-              setFriendsList(res.friends || []);
-            } else {
-              setFriendsList((prev) => {
-                const newFriends = (res.friends || []).filter(
-                  (f: any) => !prev.some((p) => p.serial === f.serial),
-                );
-                return [...prev, ...newFriends];
-              });
+      console.log("Pagination Check:", {
+        friendsListLength: friendsList.length,
+        friendsPage,
+        expectedLength: (friendsPage - 1) * 10,
+        friendsTotal,
+      });
+      if (friendsList.length >= (friendsPage - 1) * 10) {
+        setFriendsLoading(true);
+        socket.emit(
+          "get_friends",
+          { serial: playerSerial, page: friendsPage },
+          (res: any) => {
+            if (res.success) {
+              if (friendsPage === 1) {
+                setFriendsList(res.friends || []);
+              } else {
+                setFriendsList((prev) => {
+                  const newFriends = (res.friends || []).filter(
+                    (f: any) => !prev.some((p) => p.serial === f.serial),
+                  );
+                  return [...prev, ...newFriends];
+                });
+              }
+              setFriendsTotal(res.total || 0);
             }
-            setFriendsTotal(res.total || 0);
-          }
-          setFriendsLoading(false);
-        },
-      );
+            setFriendsLoading(false);
+          },
+        );
+      }
     }
   }, [showFriendsModal, friendsPage, socket, playerSerial]);
 
@@ -3476,7 +4103,16 @@ export default function App() {
     }
   }, [room?.id, room?.players.length, socket, playerSerial]);
 
-  const [categories, setCategories] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>(() => {
+    try {
+      const cached = localStorage.getItem("khamin_categories_cache");
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return DEFAULT_CATEGORIES;
+  });
   const [selectedCategoryLevel, setSelectedCategoryLevel] = useState<string>(
     "مستوي مبتدئين التخمين",
   );
@@ -3641,6 +4277,15 @@ export default function App() {
   ]);
   const [onlineCount, setOnlineCount] = useState(0);
   const [totalPlayersCount, setTotalPlayersCount] = useState(0);
+
+  const getTextDirection = (text: string): "ltr" | "rtl" => {
+    if (!text) return "rtl";
+    const hasArabic = /[\u0600-\u06FF]/.test(text);
+    const hasEnglish = /[a-zA-Z]/.test(text);
+    if (hasEnglish && !hasArabic) return "ltr";
+    if (hasArabic) return "rtl";
+    return hasEnglish ? "ltr" : "rtl";
+  };
   const [proposedMatch, setProposedMatch] = useState<{
     matchId: string;
     opponent: {
@@ -3987,6 +4632,7 @@ export default function App() {
             type: "reward",
             name: "lucky_wheel_spin",
             beforeAd: () => {
+            (window as any).adStartTime = Date.now();
               clearTimeout(adTimeout);
               if (adFinished) setMockAdProviderState(null);
               adFinished = false;
@@ -4171,11 +4817,21 @@ export default function App() {
     // Prevent opening the next modal if any of the sequence modals (or welcome modal) are currently open
     if (
       showWelcomeModal ||
+      showWCGiftModal ||
       showDailyQuestModal ||
       showLuckyWheelModal ||
       showCitySearch
     )
       return;
+
+    // 0. World Cup Gift
+    const wcClaimed = localStorage.getItem(`wc_gift_claimed_2026_${playerSerial}`) === "true";
+    const now = new Date();
+    const WC_END_DATE = new Date("2026-07-20T00:00:00Z");
+    if (now <= WC_END_DATE && !wcClaimed) {
+      setShowWCGiftModal(true);
+      return;
+    }
 
     // 1. Daily Quest
     const hasUnclaimedDaily =
@@ -4227,6 +4883,7 @@ export default function App() {
     hasSeenCitySearchToday,
     citySearchState,
     showWelcomeModal,
+    showWCGiftModal,
     showDailyQuestModal,
     showLuckyWheelModal,
     showCitySearch,
@@ -4455,6 +5112,16 @@ export default function App() {
       playSound("clickOpen");
       closeAllModals();
       setShowLeaderboardModal(true);
+      if (socket) {
+        socket.emit("get_top_players", (players: any[]) => {
+          if (Array.isArray(players)) {
+            setTopPlayers(sortPlayers(players));
+            try {
+              localStorage.setItem("khamin_top_players", JSON.stringify(players));
+            } catch (e) {}
+          }
+        });
+      }
     }
   };
 
@@ -4494,6 +5161,7 @@ export default function App() {
     setShowReportModal(false);
     setShowShopModal(false);
     setShowLuckyWheelModal(false);
+    setShowWCGiftModal(false);
   };
 
   const toggleSettings = () => {
@@ -4515,13 +5183,13 @@ export default function App() {
 
   const handleBuyTokensWithKeys = () => {
     playSound("clickOpen");
-    if ((keys || 0) < 25) {
+    if ((keys || 0) < 100) {
       showAlert("ليس لديك مفاتيح كافية!", "المتجر");
       return;
     }
 
     showConfirm(
-      "هل تريد تحويل 25 مفتاح إلى 10 تخمينات؟",
+      "هل تريد تحويل 100 مفتاح إلى 10 تخمينات؟",
       () => {
         socket?.emit(
           "buy_tokens_with_keys",
@@ -4547,7 +5215,7 @@ export default function App() {
     }
 
     showConfirm(
-      "هل تريد تفعيل باقة المحترفين لمدة 3 أيام مقابل 100 مفتاح؟",
+      "هل تريد تفعيل باقة المحترفين لمدة يوم واحد مقابل 100 مفتاح؟",
       () => {
         socket?.emit(
           "buy_pro_with_keys",
@@ -4580,7 +5248,7 @@ export default function App() {
     setIsInitiatingPayment(true);
 
     try {
-      const response = await fetch("/api/paymob/initiate", {
+      const response = await fetch(apiUrl("/api/paymob/initiate"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -4616,6 +5284,8 @@ export default function App() {
       playSound("clickOpen");
       closeAllModals();
       setShowShopModal(true);
+      setHasNewStoreOffers(false);
+      localStorage.setItem("khamin_last_opened_store", Date.now().toString());
     }
   };
 
@@ -4693,19 +5363,51 @@ export default function App() {
   }, [room?.gameState, roomId, socket]);
 
   useEffect(() => {
-    const fetchCats = () => {
-      fetch("/api/categories")
-        .then((res) => res.json())
-        .then((data) => setCategories(data))
-        .catch((err) => console.error("Failed to fetch categories:", err));
+    const fetchCats = (force = false) => {
+      if (!force) {
+        const cached = localStorage.getItem("khamin_categories_cache");
+        const cachedTime = localStorage.getItem("khamin_categories_cache_time");
+        if (cached && cachedTime) {
+          const age = Date.now() - parseInt(cachedTime, 10);
+          if (age < 30 * 60 * 1000) {
+            // Cache is young enough, skip API call
+            return;
+          }
+        }
+      }
+      if (isServerlessMode()) {
+        setCategories(DEFAULT_CATEGORIES);
+        return;
+      }
+      fetch(apiUrl("/api/categories"))
+        .then((res) => {
+          if (!res.ok) throw new Error("Categories fetch not ok");
+          return res.json();
+        })
+        .then((data) => {
+          if (Array.isArray(data) && data.length > 0) {
+            setCategories(data);
+            try {
+              localStorage.setItem("khamin_categories_cache", JSON.stringify(data));
+              localStorage.setItem("khamin_categories_cache_time", Date.now().toString());
+            } catch (e) {}
+          } else {
+            setCategories(DEFAULT_CATEGORIES);
+          }
+        })
+        .catch((err) => {
+          console.warn("Using default categories (Serverless/Offline):", err);
+          setCategories(DEFAULT_CATEGORIES);
+        });
     };
 
-    fetchCats();
+    fetchCats(false);
 
     if (socket) {
-      socket.on("categories_updated", fetchCats);
+      const handleCatsUpdated = () => fetchCats(true);
+      socket.on("categories_updated", handleCatsUpdated);
       return () => {
-        socket.off("categories_updated", fetchCats);
+        socket.off("categories_updated", handleCatsUpdated);
       };
     }
   }, [socket]);
@@ -4726,7 +5428,7 @@ export default function App() {
       setIsSearching(false);
       setJoined(false);
       socket?.emit("leave_matchmaking");
-      setRoomId((prev) => (prev.startsWith("random_") ? "" : prev));
+      setRoomId((prev) => (prev.startsWith("random_") || prev === "waiting_friend" ? "" : prev));
       setError("لم يتم العثور على منافس حالياً. يرجى المحاولة في وقت لاحق.");
       setTimeout(() => setError(""), 5000);
       setSearchTimeLeft(null);
@@ -4784,6 +5486,14 @@ export default function App() {
   const [chatInput, setChatInput] = useState("");
   const [isOpponentTyping, setIsOpponentTyping] = useState(false);
   const [showEmotes, setShowEmotes] = useState(false);
+  const [guessChatUnlocked, setGuessChatUnlocked] = useState(false);
+  const [showGuessChatLockAlert, setShowGuessChatLockAlert] = useState(false);
+
+  useEffect(() => {
+    if (!room || room.gameState === "waiting" || room.selectionMode === "ready") {
+      setGuessChatUnlocked(false);
+    }
+  }, [room?.id, room?.gameState, room?.selectionMode]);
 
   // Typing logic
   useEffect(() => {
@@ -4837,16 +5547,83 @@ export default function App() {
   const [isOpponentBlocked, setIsOpponentBlocked] = useState(false);
   const [useToken, setUseToken] = useState(false);
   const [isMutedByOpponent, setIsMutedByOpponent] = useState(false);
+  const [busAnswers, setBusAnswers] = useState({
+    boy: "",
+    girl: "",
+    animal: "",
+    plant: "",
+    inanimate: "",
+    country: "",
+  });
+  const hasRestoredBusDraftRef = useRef(false);
+  const [spinLetter, setSpinLetter] = useState("؟");
+  const [hideBusResults, setHideBusResults] = useState(false);
+  const [showDotsTutorial, setShowDotsTutorial] = useState(false);
   const isOpponentBlockedRef = useRef(isOpponentBlocked);
   useEffect(() => {
     isOpponentBlockedRef.current = isOpponentBlocked;
   }, [isOpponentBlocked]);
 
+  useEffect(() => {
+    if (room?.gameState === "dots_playing" && room.dotsTurn === socket?.id) {
+      if (!localStorage.getItem("dots_tutorial_seen")) {
+        setShowDotsTutorial(true);
+      }
+    }
+  }, [room?.gameState, room?.dotsTurn, socket?.id]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (room?.gameState === "bus_complete_spin") {
+      const letters = [
+        "أ",
+        "ب",
+        "ت",
+        "ث",
+        "ج",
+        "ح",
+        "خ",
+        "د",
+        "ذ",
+        "ر",
+        "ز",
+        "س",
+        "ش",
+        "ص",
+        "ض",
+        "ط",
+        "ظ",
+        "ع",
+        "غ",
+        "ف",
+        "ق",
+        "ك",
+        "ل",
+        "م",
+        "ن",
+        "ه",
+        "و",
+        "ي",
+      ];
+      interval = setInterval(() => {
+        setSpinLetter(letters[Math.floor(Math.random() * letters.length)]);
+        playSound("cyclingReward");
+      }, 100);
+    } else if (room?.busCompleteLetter) {
+      setSpinLetter(room.busCompleteLetter);
+      stopSound("cyclingReward");
+      playSound("bell");
+    } else {
+      setSpinLetter("؟");
+    }
+    return () => clearInterval(interval);
+  }, [room?.gameState, room?.busCompleteLetter]);
+
   // Friend System Functions
   const handleAddFriend = (targetSerial: string) => {
     if (!socket || !playerSerial) return;
 
-    if (friendsList.length >= 50) {
+    if (!isAdmin && friendsList.length >= 50) {
       showAlert(
         "قائمة الأصدقاء ممتلئة, يجب حذف صديق لإضافة صديق جديد!",
         "تنبيه",
@@ -4957,7 +5734,7 @@ export default function App() {
   const handleAcceptFriendRequest = (requestId: string) => {
     if (!socket || !playerSerial) return;
 
-    if (friendsList.length >= 50) {
+    if (!isAdmin && friendsList.length >= 50) {
       showAlert(
         "قائمة الأصدقاء ممتلئة, يجب حذف صديق لإضافة صديق جديد!",
         "تنبيه",
@@ -4998,7 +5775,11 @@ export default function App() {
             },
           );
           const fingerprint = localStorage.getItem("khamin_fingerprint");
-          socket.emit("get_player_data", { serial: playerSerial, fingerprint, secretToken: localStorage.getItem("khamin_secret_token") });
+          socket.emit("get_player_data", {
+            serial: playerSerial,
+            fingerprint,
+            secretToken: localStorage.getItem("khamin_secret_token"),
+          });
         } else if (res && res.limitReached) {
           showAlert(
             res.error ||
@@ -5069,6 +5850,7 @@ export default function App() {
   const audioRef = useRef<{ [key: string]: Howl }>({});
   const lobbyMusicRef = useRef<Howl | null>(null);
   const gameMusicRef = useRef<Howl | null>(null);
+  const beachRaceMusicRef = useRef<Howl | null>(null);
 
   useEffect(() => {
     // Initialize sounds
@@ -5089,6 +5871,20 @@ export default function App() {
           volume: musicVolume,
           html5: true,
         });
+      } else if (key === "beachRaceBackground") {
+        beachRaceMusicRef.current = new Howl({
+          src: [url],
+          loop: true,
+          preload: true,
+          volume: musicVolume,
+          html5: true,
+        });
+      } else if (key === "bombFuse") {
+        audioRef.current[key] = new Howl({
+          src: [url],
+          loop: true,
+          preload: true,
+        });
       } else {
         audioRef.current[key] = new Howl({ src: [url], preload: true });
       }
@@ -5097,27 +5893,69 @@ export default function App() {
     return () => {
       if (lobbyMusicRef.current) lobbyMusicRef.current.unload();
       if (gameMusicRef.current) gameMusicRef.current.unload();
+      if (beachRaceMusicRef.current) beachRaceMusicRef.current.unload();
       Object.values(audioRef.current).forEach((howl: any) => howl.unload());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const isGameActive =
-      room?.gameState === "guessing" ||
-      room?.gameState === "discussion" ||
-      room?.gameState === "custom_image_upload";
+    const isBeachRacePlaying = !!room && room.gameState === "beach_race_playing";
+    const isGameActive = !!room && (
+      room.gameState === "playing" ||
+      room.gameState === "finished" ||
+      room.gameState === "bomb_party_playing" ||
+      room.gameState === "bomb_party_finished" ||
+      room.gameState === "xo_playing" ||
+      room.gameState === "xo_finished" ||
+      room.gameState === "iq_playing" ||
+      room.gameState === "iq_finished" ||
+      room.gameState === "dots_playing" ||
+      room.gameState === "dots_finished" ||
+      room.gameState === "bus_complete_playing" ||
+      room.gameState === "bus_complete_evaluating" ||
+      room.gameState === "bus_complete_spin" ||
+      room.gameState === "bus_complete_finished" ||
+      room.gameState === "hand_playing" ||
+      room.gameState === "hand_finished" ||
+      room.gameState === "speed_cups_playing" ||
+      room.gameState === "speed_cups_evaluating" ||
+      room.gameState === "speed_cups_finished" ||
+      room.gameState === "speed_cups_countdown" ||
+      room.gameState === "wordle_setup" ||
+      room.gameState === "wordle_playing" ||
+      room.gameState === "wordle_finished" ||
+      room.gameState === "connect_four_words_setup" ||
+      room.gameState === "connect_four_words_playing" ||
+      room.gameState === "connect_four_words_finished" ||
+      room.gameState === "space_war_setup" ||
+      room.gameState === "space_war_playing" ||
+      room.gameState === "space_war_finished" ||
+      room.gameState === "puzzle_setup" ||
+      room.gameState === "puzzle_playing" ||
+      room.gameState === "puzzle_finished" ||
+      room.gameState === "beach_race_setup" ||
+      room.gameState === "beach_race_playing" ||
+      room.gameState === "beach_race_finished"
+    );
 
-    const activeMusic = isGameActive
+    const activeMusic = isBeachRacePlaying
+      ? beachRaceMusicRef.current
+      : isGameActive
       ? gameMusicRef.current
       : lobbyMusicRef.current;
-    const inactiveMusic = isGameActive
-      ? lobbyMusicRef.current
-      : gameMusicRef.current;
 
-    if (inactiveMusic && inactiveMusic.playing()) {
-      inactiveMusic.pause();
-    }
+    const allMusics = [
+      lobbyMusicRef.current,
+      gameMusicRef.current,
+      beachRaceMusicRef.current,
+    ];
+
+    allMusics.forEach((music) => {
+      if (music && music !== activeMusic && music.playing()) {
+        music.pause();
+      }
+    });
 
     if (activeMusic) {
       // Set volume
@@ -5181,6 +6019,188 @@ export default function App() {
       sound.stop();
     }
   }, []);
+
+  useEffect(() => {
+    if (room?.gameState === "hand_playing" && room?.handPhase === "picking" && room.handPickerId === socket?.id) {
+       playSound("clockTicking");
+    } else {
+       stopSound("clockTicking");
+    }
+  }, [room?.gameState, room?.handPhase, room?.handPickerId, socket?.id, playSound, stopSound]);
+
+  // Loop bombFuse sound during active Bomb Party play phase
+  useEffect(() => {
+    if (room?.gameState === "bomb_party_playing") {
+      playSound("bombFuse");
+    } else {
+      stopSound("bombFuse");
+    }
+  }, [room?.gameState, playSound, stopSound]);
+
+  // Synchronized ticking of boomSingleTick with the bomb's heartbeat pulse
+  useEffect(() => {
+    if (room?.gameState !== "bomb_party_playing" || !room?.bombParty || room?.bombParty?.gameOver) {
+      return;
+    }
+
+    let timeoutId: any;
+
+    const tick = () => {
+      playSound("boomSingleTick");
+
+      // Calculate elapsed time directly using Date.now() to avoid state dependencies
+      const elapsed = Math.max(0, Date.now() - room.bombParty!.bombStartTime);
+      const remainingMs = Math.max(0, room.bombParty!.turnTimeLimit - elapsed);
+      const turnLimitSec = (room.bombParty!.turnTimeLimit || 10000) / 1000;
+      const ratio = Math.max(0, Math.min(1, (remainingMs / 1000) / turnLimitSec));
+      
+      // Calmer pulse duration: from 1.2s down to 0.5s
+      const pulseDuration = 0.5 + 0.7 * ratio;
+
+      timeoutId = setTimeout(tick, pulseDuration * 1000);
+    };
+
+    // Schedule the first tick shortly
+    timeoutId = setTimeout(tick, 100);
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [room?.gameState, room?.bombParty?.bombStartTime, room?.bombParty?.turnTimeLimit, room?.bombParty?.gameOver, playSound]);
+
+  const prevGameStateRef = useRef<string | null>(null);
+  const prevHandGridCountRef = useRef<number>(0);
+  const prevHandNextIdxRef = useRef<number>(-1);
+  
+  useEffect(() => {
+    if (room?.gameState === "hand_playing" && room.handGrid && room.handPickerId === socket?.id) {
+      const filledCount = room.handGrid.filter((c: any) => c !== null).length;
+      if (filledCount > prevHandGridCountRef.current) {
+         playSound("handXFill");
+      }
+      prevHandGridCountRef.current = filledCount;
+    } else if (room?.gameState !== "hand_playing") {
+      prevHandGridCountRef.current = 0;
+      prevHandNextIdxRef.current = -1;
+    }
+  }, [room?.gameState, room?.handGrid, room?.handPickerId, socket?.id, playSound]);
+
+  useEffect(() => {
+    
+    if (room && room.gameState === "bomb_party_finished" && prevGameStateRef.current === "bomb_party_playing") {
+      const winnerId = room.bombParty?.matchWinnerId;
+      const isDraw = !winnerId;
+      const isMeWinner = winnerId === socket?.id;
+      
+      if (isMeWinner) {
+        playSound("win");
+        setBombPartyMatchPoints(prev => prev + 10); // Winner gets 10 points to match standard games
+      } else if (isDraw) {
+        playSound("pop");
+      } else {
+        playSound("bombExplosion");
+        
+        // Trigger 9-frame explosion sequence (100ms per frame)
+        let currentFrame = 1;
+        setBombExplosionFrame(1);
+        const interval = setInterval(() => {
+          currentFrame += 1;
+          if (currentFrame <= 9) {
+            setBombExplosionFrame(currentFrame);
+          } else {
+            clearInterval(interval);
+            setBombExplosionFrame(null);
+          }
+        }, 100);
+      }
+    }
+
+    if (room && room.gameState === "xo_finished" && prevGameStateRef.current === "xo_playing") {
+      if (room.xoWinner === socket?.id) {
+        playSound("win");
+      } else if (room.xoWinner === "draw") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+    if (room && room.gameState === "iq_finished" && prevGameStateRef.current === "iq_playing") {
+      if (room.iqWinner === socket?.id) {
+        playSound("win");
+      } else if (room.iqWinner === "draw") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+    if (room && room.gameState === "dots_finished" && prevGameStateRef.current === "dots_playing" && room.players.find(p => p.id === socket?.id)) {
+      if (room.dotsWinner === socket?.id) {
+        playSound("win");
+      } else if (room.dotsWinner === "draw") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+    if (room && room.gameState === "speed_cups_finished" && (prevGameStateRef.current === "speed_cups_playing" || prevGameStateRef.current === "speed_cups_evaluating")) {
+      stopSound("correct");
+      stopSound("wrong");
+      if (room.speedCupsWinner === socket?.id) {
+        playSound("win");
+      } else if (room.speedCupsWinner === "draw") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+
+    if (room && room.gameState === "bus_complete_evaluating" && prevGameStateRef.current === "bus_complete_playing") {
+      if (room.busCompleteWinner === socket?.id) {
+        playSound("win");
+      } else if (room.busCompleteWinner === "tie") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+    if (room && room.gameState === "hand_finished" && prevGameStateRef.current === "hand_playing") {
+      if (room.handWinner === socket?.id) {
+        playSound("win");
+      } else if (room.handWinner === "draw") {
+        playSound("pop");
+      } else {
+        playSound("lose");
+      }
+    }
+
+    prevGameStateRef.current = room?.gameState || null;
+  }, [room?.gameState, room?.xoWinner, room?.iqWinner, room?.busCompleteWinner, room?.handWinner, socket?.id, playSound]);
+
+  useEffect(() => {
+    if (room?.gameState === "bus_complete_playing" && socket?.id && room?.busCompleteDraftAnswers?.[socket.id]) {
+       if (!hasRestoredBusDraftRef.current) {
+         const drafts = room.busCompleteDraftAnswers[socket.id];
+         const currentEmpty = Object.values(busAnswers).every(v => !v);
+         if (currentEmpty && drafts && Object.values(drafts).some(v => v)) {
+             setBusAnswers(drafts);
+             hasRestoredBusDraftRef.current = true;
+         }
+       }
+    } else if (room?.gameState !== "bus_complete_playing") {
+       hasRestoredBusDraftRef.current = false;
+    }
+  }, [room?.gameState, room?.busCompleteDraftAnswers, socket?.id]);
+
+  useEffect(() => {
+    if ((room as any)?.iqPreloadImages && Array.isArray((room as any).iqPreloadImages)) {
+      preloadIQImages((room as any).iqPreloadImages);
+    }
+  }, [room?.iqPreloadImages, (room as any)?.iqLevel]);
 
   const clearPlayerData = () => {
     // Clear all localStorage items related to the game
@@ -5418,7 +6438,7 @@ export default function App() {
   const fetchAdminImages = useCallback(async () => {
     try {
       console.log("Fetching admin images...");
-      const res = await fetch("/api/admin/images");
+      const res = await fetch(apiUrl("/api/admin/images"));
       const data = await res.json();
       console.log("Admin images fetched:", data);
       if (Array.isArray(data)) setAdminImages(data);
@@ -5428,8 +6448,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchAdminImages();
-  }, [fetchAdminImages]);
+    if (isAdmin && showAdminDashboard && adminTab === "images") {
+      fetchAdminImages();
+    }
+  }, [isAdmin, showAdminDashboard, adminTab, fetchAdminImages]);
 
   useEffect(() => {
     console.log(
@@ -5438,12 +6460,49 @@ export default function App() {
     );
   }, [adminImages]);
 
-  const fetchCollection = useCallback(async (serial: string) => {
+  const lastFetchedCollectionTimeRef = useRef<{ [serial: string]: number }>({});
+  const fetchCollection = useCallback(async (serial: string, force = false) => {
+    if (!serial) return;
+    const now = Date.now();
+    if (
+      !force &&
+      lastFetchedCollectionTimeRef.current[serial] &&
+      now - lastFetchedCollectionTimeRef.current[serial] < 10 * 60 * 1000 // 10 minutes cache
+    ) {
+      return;
+    }
+
+    // Check localStorage cache if not forced
+    if (!force) {
+      const cachedTime = localStorage.getItem(`khamin_collection_cache_time_${serial}`);
+      if (cachedTime) {
+        const age = now - parseInt(cachedTime, 10);
+        if (age < 10 * 60 * 1000) {
+          lastFetchedCollectionTimeRef.current[serial] = parseInt(cachedTime, 10);
+          return;
+        }
+      }
+    }
+
+    lastFetchedCollectionTimeRef.current[serial] = now;
     try {
-      const res = await fetch(`/api/collection/${serial}`);
+      const res = await fetch(apiUrl(`/api/collection/${serial}`));
       const data = await res.json();
-      if (data.collection) setPlayerCollection(data.collection);
-      if (data.claimed) setClaimedCollectionRewards(data.claimed);
+      if (data.collection) {
+        setPlayerCollection(data.collection);
+        try {
+          localStorage.setItem(`khamin_collection_cache_${serial}`, JSON.stringify(data.collection));
+        } catch (e) {}
+      }
+      if (data.claimed) {
+        setClaimedCollectionRewards(data.claimed);
+        try {
+          localStorage.setItem(`khamin_claimed_cache_${serial}`, JSON.stringify(data.claimed));
+        } catch (e) {}
+      }
+      try {
+        localStorage.setItem(`khamin_collection_cache_time_${serial}`, now.toString());
+      } catch (e) {}
     } catch (error) {
       console.error("Fetch collection failed", error);
     }
@@ -5466,7 +6525,11 @@ export default function App() {
         fetchCollection(playerSerial);
         const fingerprint = localStorage.getItem("khamin_fingerprint");
         if (fingerprint) {
-          socket.emit("get_player_data", { serial: playerSerial, fingerprint, secretToken: localStorage.getItem("khamin_secret_token") });
+          socket.emit("get_player_data", {
+            serial: playerSerial,
+            fingerprint,
+            secretToken: localStorage.getItem("khamin_secret_token"),
+          });
         }
       });
       return () => {
@@ -5508,13 +6571,12 @@ export default function App() {
           }
         }
       });
-      fetchAdminImages();
     }
   }, [showAdminDashboard, socket]);
 
   const fetchCategories = async () => {
     try {
-      const res = await fetch("/api/categories");
+      const res = await fetch(apiUrl("/api/categories"));
       const data = await res.json();
       setCategories(data);
     } catch (error) {
@@ -5527,7 +6589,7 @@ export default function App() {
     setIsAddingCategory(true);
     try {
       const id = newCategory.name.toLowerCase().replace(/\s+/g, "_");
-      const response = await fetch("/api/admin/categories", {
+      const response = await fetch(apiUrl("/api/admin/categories"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -5556,7 +6618,7 @@ export default function App() {
       "هل أنت متأكد من حذف هذه الفئة وجميع الصور المرتبطة بها؟",
       async () => {
         try {
-          const response = await fetch(`/api/admin/categories/${id}`, {
+          const response = await fetch(apiUrl(`/api/admin/categories/${id}`), {
             method: "DELETE",
           });
           if (response.ok) {
@@ -5579,7 +6641,7 @@ export default function App() {
     setIsUploading(true);
     try {
       const targetLevel = expandedUploadLevel || "مستوي مبتدئين التخمين";
-      const response = await fetch("/api/admin/images", {
+      const response = await fetch(apiUrl("/api/admin/images"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -5613,7 +6675,7 @@ export default function App() {
       "هل أنت متأكد من حذف هذه الصورة؟",
       async () => {
         try {
-          const response = await fetch(`/api/admin/images/${id}`, {
+          const response = await fetch(apiUrl(`/api/admin/images/${id}`), {
             method: "DELETE",
           });
           if (response.ok) {
@@ -5630,15 +6692,87 @@ export default function App() {
   };
 
   const connectSocket = useCallback(() => {
-    console.log("Initializing socket connection to:", window.location.origin);
-    const newSocket = io(window.location.origin, {
-      transports: ["websocket", "polling"],
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      timeout: 20000,
-    });
+    if (socketRef.current) {
+      try {
+        console.log("Disconnecting existing socket to prevent duplicates...");
+        socketRef.current.removeAllListeners();
+        socketRef.current.disconnect();
+      } catch (e) {
+        console.error("Error disconnecting existing socket:", e);
+      }
+    }
 
+    setIsConnecting(true);
+    setIsConnected(false);
+    setConnectionError(null);
+
+    let newSocket: any;
+    if (isServerlessMode()) {
+      console.log("[Serverless Mode] Active - initializing ServerlessSocket directly");
+      newSocket = getServerlessSocket();
+    } else {
+      const serverUrl = getApiBaseUrl();
+      console.log("Initializing socket connection to:", serverUrl);
+      try {
+        newSocket = io(serverUrl, {
+          transports: ["websocket"],
+          upgrade: false,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          timeout: 10000,
+        });
+      } catch (err) {
+        console.warn("io() initialization failed, falling back to ServerlessSocket:", err);
+        newSocket = getServerlessSocket();
+      }
+    }
+
+    if (newSocket && typeof newSocket.emit === "function" && !isServerlessMode()) {
+      const originalEmit = newSocket.emit;
+      newSocket.emit = function(event: string, ...args: any[]) {
+        const room = GameEngineService.getCurrentRoom();
+        const isBotOrOffline = room?.players?.[1]?.isBot || !this.connected;
+        
+        // Events that must ALWAYS go to real server (if possible) or be ignored
+        const serverEvents = [
+          "check_ad_status", "check_key_ad_status", "update_player_notifications", 
+          "set_player_serial_for_socket", "update_player_privacy", "update_avatar",
+          "update_selected_frame", "find_random_match", "leave_matchmaking", "respond_to_match",
+          "admin_get_active_rooms", "admin_get_reward_history", "admin_get_pending_avatars",
+          "admin_get_contacts"
+        ];
+
+        if (isBotOrOffline && !serverEvents.includes(event)) {
+           console.log("[Serverless Intercept] Routing to GameEngineService:", event, args[0]);
+           GameEngineService.handleAction(event, args[0]);
+           return this as any;
+        }
+        
+        return originalEmit.apply(this, [event, ...args] as any);
+      };
+      
+      const originalOn = newSocket.on;
+      newSocket.on = function(event: string, fn: any) {
+        GameEngineService.on(event, fn);
+        return originalOn.apply(this, [event, fn] as any);
+      };
+
+      const originalOff = newSocket.off;
+      newSocket.off = function(event: string, fn?: any) {
+        if (fn) {
+          GameEngineService.off(event, fn);
+        }
+        return originalOff.apply(this, [event, fn] as any);
+      };
+    }
+    
+    socketRef.current = newSocket;
     setSocket(newSocket);
+
+    if (isServerlessMode()) {
+      setIsConnected(true);
+      setIsConnecting(false);
+    }
 
     newSocket.on("config_updated", () => {
       refreshConfig();
@@ -5652,6 +6786,184 @@ export default function App() {
       setActiveGlobalReward(reward);
     });
 
+    newSocket.on("bus_complete_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا تخمينة كومبليت بنجاح! 🎁",
+         message: "تم ترقية مستوى الهدايا إلى " + data.newLevel + "! متبقى 48 ساعة فقط قبل انتهاء صلاحية هدايا الوسائل المساعدة والمفاتيح التي استلمتها الان! استمتع بها.\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel > 1 ? data.newLevel - 1 : 10) + " من كل وسيلة مساعدة",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+      
+      if (data.points != null) {
+        setBusCompleteMatchPoints(data.points);
+        localStorage.setItem("khamin_bus_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setBusCompleteRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_bus_reward_level", data.newLevel.toString());
+      }
+    });
+
+    newSocket.on("hand_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا التخمين بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا كف اليد إلى " + data.newLevel + "!\n\n" +
+                  "تم إضافة:\n" +
+                  `+ ${data.xp} نقطة خبرة ✨\n` +
+                  `+ ${data.keys} مفاتيح 🔑\n` +
+                  `+ ${Object.values(data.helpers)[0]} من كل وسيلة مساعدة 🛠️`,
+         confirmText: "رائع!",
+         onConfirm: () => { setCustomConfirm({ show: false, title: "", message: "", confirmText: "", onConfirm: () => {} }); }
+      });
+      if (data.points != null) {
+        setHandMatchPoints(data.points);
+        localStorage.setItem("khamin_hand_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setHandRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_hand_reward_level", data.newLevel.toString());
+      }
+    });
+
+    newSocket.on("iq_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا IQ بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا IQ إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel > 1 ? data.newLevel - 1 : 10) + " من كل وسيلة مساعدة",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+      if (data.points != null) {
+        setIqMatchPoints(data.points);
+        localStorage.setItem("khamin_iq_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setIqRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_iq_reward_level", data.newLevel.toString());
+      }
+    });
+
+    newSocket.on("beach_race_reward_claimed", (data: any) => {
+      playSound("prize");
+      if (data.newLevel != null) {
+        setBeachRaceRewardLevel(data.newLevel);
+        setBeachRaceMatchPoints(0);
+        localStorage.setItem("khamin_beach_race_reward_level", data.newLevel.toString());
+        localStorage.setItem("khamin_beach_race_match_points", "0");
+      }
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا سباق التخمين بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا سباق التخمين إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel - 1) + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+    });
+
+    newSocket.on("wordle_reward_claimed", (data: any) => {
+      playSound("prize");
+      if (data.points != null) {
+        setWordleMatchPoints(data.points);
+        localStorage.setItem("khamin_wordle_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setWordleRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_wordle_reward_level", data.newLevel.toString());
+      }
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا تخمينة كلمة لي بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا تخمينة كلمة لي إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + data.newLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+    });
+    newSocket.on("xo_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا XO بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا XO إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel > 1 ? data.newLevel - 1 : 10) + " من كل وسيلة مساعدة",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+      if (data.points != null) {
+        setXoMatchPoints(data.points);
+        localStorage.setItem("khamin_xo_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setXoRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_xo_reward_level", data.newLevel.toString());
+      }
+    });
+
+    newSocket.on("bomb_party_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا قنبلة التخمين بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا قنبلة التخمين إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel > 1 ? data.newLevel - 1 : 10) + " من كل وسيلة مساعدة",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+      if (data.newLevel != null) {
+        setBombPartyRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_bomb_reward_level", data.newLevel.toString());
+      }
+    });
+
+    newSocket.on("dots_reward_claimed", (data: any) => {
+      playSound("prize");
+      setCustomConfirm({
+         show: true,
+         title: "تم استلام هدايا لعبة نقطة وخط بنجاح! 🎁",
+         message: "تم ترقية مستوى هدايا نقطة وخط إلى " + data.newLevel + "!\n\n" +
+                  "حصلت على:\n" +
+                  "⭐ " + data.xp + " خبرة\n" +
+                  "🔑 " + data.keys + " مفاتيح\n" +
+                  "🔧 " + (data.newLevel > 1 ? data.newLevel - 1 : 10) + " من كل وسيلة مساعدة",
+         confirmText: "رائع!",
+         onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+      });
+      if (data.points != null) {
+        setDotsMatchPoints(data.points);
+        localStorage.setItem("khamin_dots_match_points", data.points.toString());
+      }
+      if (data.newLevel != null) {
+        setDotsRewardLevel(data.newLevel);
+        localStorage.setItem("khamin_dots_reward_level", data.newLevel.toString());
+      }
+    });
+
     newSocket.on("app_settings", (settings: any) => {
       if (settings && settings.lucky_wheel_enabled !== undefined) {
         setLuckyWheelEnabled(
@@ -5662,6 +6974,7 @@ export default function App() {
     });
 
     newSocket.on("connect", () => {
+      if (socketRef.current !== newSocket) return;
       console.log("Socket connected successfully! ID:", newSocket.id);
       setIsConnected(true);
       setIsConnecting(false);
@@ -5682,7 +6995,11 @@ export default function App() {
 
       const serial = localStorage.getItem("khamin_player_serial");
       if (serial) {
-        newSocket.emit("set_player_serial_for_socket", { serial, fingerprint, secretToken: localStorage.getItem("khamin_secret_token") });
+        newSocket.emit("set_player_serial_for_socket", {
+          serial,
+          fingerprint,
+          secretToken: localStorage.getItem("khamin_secret_token"),
+        });
         const isAdmin = localStorage.getItem("khamin_is_admin") === "true";
         const adminEmail =
           localStorage.getItem("khamin_admin_email") ||
@@ -5702,7 +7019,11 @@ export default function App() {
         // Fetch actual server data
         newSocket.emit(
           "get_player_data",
-          { serial, fingerprint, secretToken: localStorage.getItem("khamin_secret_token") },
+          {
+            serial,
+            fingerprint,
+            secretToken: localStorage.getItem("khamin_secret_token"),
+          },
           (data: any) => {
             if (data && data.error) {
               // We DO NOT remove the serial from localStorage here anymore.
@@ -5710,6 +7031,17 @@ export default function App() {
               setError(data.error);
               setShowWelcomeModal(true);
             } else if (data) {
+              setRoom((currentRoom) => {
+                if (currentRoom && (!data.activeRoomId || data.activeRoomId !== currentRoom.id)) {
+                  setTimeout(() => {
+                    showAlert("انتهت المباراة أو غادر منافسك أثناء انقطاع اتصالك.", "تنبيه");
+                  }, 100);
+                  setJoined(false);
+                  return null;
+                }
+                return currentRoom;
+              });
+
               setXp(data.xp);
               prevLevelRef.current = getLevel(data.xp);
               setWins(data.wins || 0);
@@ -5727,6 +7059,62 @@ export default function App() {
                 (data.tokens || 0).toString(),
               );
 
+              if (data.keys != null) {
+                setKeys(data.keys);
+                localStorage.setItem("khamin_keys", data.keys.toString());
+              }
+              if (data.busCompleteRewardLevel != null) {
+                setBusCompleteRewardLevel(data.busCompleteRewardLevel);
+                localStorage.setItem("khamin_bus_reward_level", data.busCompleteRewardLevel.toString());
+              }
+              if (data.busCompleteMatchPoints != null) {
+                setBusCompleteMatchPoints(data.busCompleteMatchPoints);
+                localStorage.setItem("khamin_bus_match_points", data.busCompleteMatchPoints.toString());
+              }
+              if (data.xoRewardLevel != null) {
+                setXoRewardLevel(data.xoRewardLevel);
+                localStorage.setItem("khamin_xo_reward_level", data.xoRewardLevel.toString());
+              }
+              if (data.iqRewardLevel != null) {
+                setIqRewardLevel(data.iqRewardLevel);
+                localStorage.setItem("khamin_iq_reward_level", data.iqRewardLevel.toString());
+              }
+              if (data.xoMatchPoints != null) {
+                setXoMatchPoints(data.xoMatchPoints);
+                localStorage.setItem("khamin_xo_match_points", data.xoMatchPoints.toString());
+              }
+              if (data.iqMatchPoints != null) {
+                setIqMatchPoints(data.iqMatchPoints);
+                localStorage.setItem("khamin_iq_match_points", data.iqMatchPoints.toString());
+              }
+              if (data.dotsRewardLevel != null) {
+                setDotsRewardLevel(data.dotsRewardLevel);
+                localStorage.setItem("khamin_dots_reward_level", data.dotsRewardLevel.toString());
+              }
+              if (data.dotsMatchPoints != null) {
+                setDotsMatchPoints(data.dotsMatchPoints);
+                localStorage.setItem("khamin_dots_match_points", data.dotsMatchPoints.toString());
+              }
+              if (data.speedCupsRewardLevel != null) {
+                setSpeedCupsRewardLevel(data.speedCupsRewardLevel);
+                localStorage.setItem("khamin_speed_cups_reward_level", data.speedCupsRewardLevel.toString());
+              }
+              if (data.speedCupsMatchPoints != null) {
+                setSpeedCupsMatchPoints(data.speedCupsMatchPoints);
+                localStorage.setItem("khamin_speed_cups_match_points", data.speedCupsMatchPoints.toString());
+              }
+              if (data.handRewardLevel != null) {
+                setHandRewardLevel(data.handRewardLevel);
+                localStorage.setItem("khamin_hand_reward_level", data.handRewardLevel.toString());
+              }
+              if (data.handMatchPoints != null) {
+                setHandMatchPoints(data.handMatchPoints);
+                localStorage.setItem("khamin_hand_match_points", data.handMatchPoints.toString());
+              }
+              if (data.likes != null) {
+                setLikes(data.likes);
+                localStorage.setItem("khamin_likes", data.likes.toString());
+              }
               if (data.tempItems) {
                 setTempItems(data.tempItems);
               }
@@ -5842,9 +7230,13 @@ export default function App() {
         setPendingWelcomeModal(true);
       }
 
-      newSocket.emit("get_top_players", (players: any[]) => {
-        setTopPlayers(sortPlayers(players));
-        localStorage.setItem("khamin_top_players", JSON.stringify(players));
+      newSocket.emit("get_player_rank", playerSerial, (rank: number) => {
+        if (typeof rank === "number") {
+          setMyLeaderboardRank(rank);
+          try {
+            localStorage.setItem("khamin_my_rank", JSON.stringify(rank));
+          } catch (e) {}
+        }
       });
 
       newSocket.emit("get_highest_likes_serial", (data: any) => {
@@ -6018,20 +7410,24 @@ export default function App() {
     });
 
     newSocket.on("connect_error", (err) => {
-      console.error("Socket connection error:", err);
-      setIsConnected(false);
+      if (socketRef.current !== newSocket) return;
+      console.warn("Socket connection error, seamlessly switching to Serverless Mode:", err);
+      const serverlessSock = getServerlessSocket();
+      socketRef.current = serverlessSock as any;
+      setSocket(serverlessSock as any);
+      setIsConnected(true);
       setIsConnecting(false);
-      setConnectionError(
-        "فشل الاتصال بالخادم. يرجى التأكد من اتصالك بالإنترنت.",
-      );
+      setConnectionError(null);
     });
 
     newSocket.on("disconnect", (reason) => {
+      if (socketRef.current !== newSocket) return;
       console.log("Socket disconnected:", reason);
       setIsConnected(false);
     });
 
     newSocket.on("disconnected_error", (msg: string) => {
+      if (socketRef.current !== newSocket) return;
       setError(msg);
       setIsConnected(false);
     });
@@ -6079,6 +7475,94 @@ export default function App() {
       if (data.keys != null) {
         setKeys(data.keys);
         localStorage.setItem("khamin_keys", data.keys.toString());
+      }
+      if (data.busCompleteRewardLevel != null) {
+        setBusCompleteRewardLevel(data.busCompleteRewardLevel);
+        localStorage.setItem("khamin_bus_reward_level", data.busCompleteRewardLevel.toString());
+      }
+      if (data.busCompleteMatchPoints != null) {
+        setBusCompleteMatchPoints(data.busCompleteMatchPoints);
+        localStorage.setItem("khamin_bus_match_points", data.busCompleteMatchPoints.toString());
+      }
+      if (data.xoRewardLevel != null) {
+                setXoRewardLevel(data.xoRewardLevel);
+                localStorage.setItem("khamin_xo_reward_level", data.xoRewardLevel.toString());
+              }
+              if (data.iqRewardLevel != null) {
+                setIqRewardLevel(data.iqRewardLevel);
+                localStorage.setItem("khamin_iq_reward_level", data.iqRewardLevel.toString());
+              }
+      if (data.xoMatchPoints != null) {
+                setXoMatchPoints(data.xoMatchPoints);
+                localStorage.setItem("khamin_xo_match_points", data.xoMatchPoints.toString());
+              }
+              if (data.iqMatchPoints != null) {
+                setIqMatchPoints(data.iqMatchPoints);
+                localStorage.setItem("khamin_iq_match_points", data.iqMatchPoints.toString());
+              }
+              if (data.dotsRewardLevel != null) {
+                setDotsRewardLevel(data.dotsRewardLevel);
+                localStorage.setItem("khamin_dots_reward_level", data.dotsRewardLevel.toString());
+              }
+              if (data.dotsMatchPoints != null) {
+                setDotsMatchPoints(data.dotsMatchPoints);
+                localStorage.setItem("khamin_dots_match_points", data.dotsMatchPoints.toString());
+              }
+              if (data.speedCupsRewardLevel != null) {
+                setSpeedCupsRewardLevel(data.speedCupsRewardLevel);
+                localStorage.setItem("khamin_speed_cups_reward_level", data.speedCupsRewardLevel.toString());
+              }
+              if (data.speedCupsMatchPoints != null) {
+                setSpeedCupsMatchPoints(data.speedCupsMatchPoints);
+                localStorage.setItem("khamin_speed_cups_match_points", data.speedCupsMatchPoints.toString());
+              }
+      if (data.handRewardLevel != null) {
+        setHandRewardLevel(data.handRewardLevel);
+        localStorage.setItem("khamin_hand_reward_level", data.handRewardLevel.toString());
+      }
+      if (data.handMatchPoints != null) {
+        setHandMatchPoints(data.handMatchPoints);
+        localStorage.setItem("khamin_hand_match_points", data.handMatchPoints.toString());
+      }
+      if (data.wordleRewardLevel != null) {
+        setWordleRewardLevel(data.wordleRewardLevel);
+        localStorage.setItem("khamin_wordle_reward_level", data.wordleRewardLevel.toString());
+      }
+      if (data.wordleMatchPoints != null) {
+        setWordleMatchPoints(data.wordleMatchPoints);
+        localStorage.setItem("khamin_wordle_match_points", data.wordleMatchPoints.toString());
+      }
+if (data.connectFourWordsRewardLevel != null) {
+        setConnectFourWordsRewardLevel(data.connectFourWordsRewardLevel);
+        localStorage.setItem("khamin_cfw_reward_level", data.connectFourWordsRewardLevel.toString());
+      }
+      if (data.connectFourWordsMatchPoints != null) {
+        setConnectFourWordsMatchPoints(data.connectFourWordsMatchPoints);
+        localStorage.setItem("khamin_cfw_match_points", data.connectFourWordsMatchPoints.toString());
+      }
+      if (data.spaceWarRewardLevel != null) {
+        setSpaceWarRewardLevel(data.spaceWarRewardLevel);
+        localStorage.setItem("khamin_space_war_reward_level", data.spaceWarRewardLevel.toString());
+      }
+      if (data.spaceWarMatchPoints != null) {
+        setSpaceWarMatchPoints(data.spaceWarMatchPoints);
+        localStorage.setItem("khamin_space_war_match_points", data.spaceWarMatchPoints.toString());
+      }
+      if (data.puzzleRewardLevel != null) {
+        setPuzzleRewardLevel(data.puzzleRewardLevel);
+        localStorage.setItem("khamin_puzzle_reward_level", data.puzzleRewardLevel.toString());
+      }
+      if (data.puzzleMatchPoints != null) {
+        setPuzzleMatchPoints(data.puzzleMatchPoints);
+        localStorage.setItem("khamin_puzzle_match_points", data.puzzleMatchPoints.toString());
+      }
+      if (data.beachRaceRewardLevel != null) {
+        setBeachRaceRewardLevel(data.beachRaceRewardLevel);
+        localStorage.setItem("khamin_beach_race_reward_level", data.beachRaceRewardLevel.toString());
+      }
+      if (data.beachRaceMatchPoints != null) {
+        setBeachRaceMatchPoints(data.beachRaceMatchPoints);
+        localStorage.setItem("khamin_beach_race_match_points", data.beachRaceMatchPoints.toString());
       }
       if (data.likes != null) {
         setLikes(data.likes);
@@ -6153,6 +7637,21 @@ export default function App() {
       setIsChestOpening(false);
     });
 
+    newSocket.on("top_3_update", (top3: any[]) => {
+      if (Array.isArray(top3)) {
+        setTopPlayers((prev) => {
+          if (prev.length > 3) {
+            const updated = [...prev];
+            for (let i = 0; i < top3.length; i++) {
+              updated[i] = top3[i];
+            }
+            return updated;
+          }
+          return top3;
+        });
+      }
+    });
+
     newSocket.on("top_players_update", (players: any[]) => {
       setTopPlayers(sortPlayers(players));
       localStorage.setItem("khamin_top_players", JSON.stringify(players));
@@ -6189,7 +7688,26 @@ export default function App() {
       setAdCooldownTimer(timeLeft);
     });
 
+    const handleHandBell = () => {
+      playSound("deskBell");
+    };
+    const handleHandWrong = () => {
+      playSound("wrong");
+      setShakeBell(true);
+      setTimeout(() => setShakeBell(false), 500);
+    };
+
+    newSocket.on("hand_bell_rung", handleHandBell);
+    newSocket.on("hand_wrong_guess", handleHandWrong);
+
+    GameEngineService.on("hand_bell_rung", handleHandBell);
+    GameEngineService.on("hand_wrong_guess", handleHandWrong);
+
     newSocket.on("room_update", (updatedRoom: Room) => {
+      if ((updatedRoom as any)?.iqPreloadImages && Array.isArray((updatedRoom as any).iqPreloadImages)) {
+        preloadIQImages((updatedRoom as any).iqPreloadImages);
+      }
+
       if (spectatingRoomIdRef.current === updatedRoom.id) {
         setSpectatorRoomData(updatedRoom);
         return;
@@ -6205,6 +7723,20 @@ export default function App() {
           setIsCustomSubmitted(false);
           setCustomImageBase64("");
           setCustomImageAnswer("");
+        }
+
+        if (
+          updatedRoom.gameState === "bus_complete_setup" ||
+          updatedRoom.gameState === "waiting"
+        ) {
+          setBusAnswers({
+            boy: "",
+            girl: "",
+            animal: "",
+            plant: "",
+            inanimate: "",
+            country: "",
+          });
         }
 
         if (
@@ -6250,6 +7782,19 @@ export default function App() {
         setTimeout(() => setError(""), 3000);
       }
 
+      if (
+        updatedRoom.gameState === "hand_playing" &&
+        roomRef.current?.gameState === "hand_playing" &&
+        updatedRoom.handGrid &&
+        roomRef.current?.handGrid
+      ) {
+        const currentFilledCount = roomRef.current.handGrid.filter((c: any) => c !== null).length;
+        const incomingFilledCount = updatedRoom.handGrid.filter((c: any) => c !== null).length;
+        if (incomingFilledCount < currentFilledCount) {
+          updatedRoom.handGrid = roomRef.current.handGrid;
+        }
+      }
+
       setRoom(updatedRoom);
       setJoined(true);
 
@@ -6262,11 +7807,6 @@ export default function App() {
           JSON.stringify(me.ownedHelpers),
         );
       }
-    });
-
-    newSocket.on("theme_updated", (newTheme: ThemeConfig) => {
-      console.log("Theme updated from server:", newTheme);
-      setThemeConfig(newTheme);
     });
 
     newSocket.on("policies_update", (policies: any) => {
@@ -6309,6 +7849,23 @@ export default function App() {
 
     newSocket.on("timer_update", (timer: number) => {
       setRoom((prev) => (prev ? { ...prev, timer } : null));
+    });
+    newSocket.on("iq_timer_update", (timer: number) => {
+      setRoom((prev) => (prev ? { ...prev, iqTurnTimer: timer } : null));
+    });
+    newSocket.on("dots_timer_update", (timer: number) => {
+      setRoom((prev) => (prev ? { ...prev, dotsTurnTimer: timer } : null));
+    });
+    newSocket.on("speed_cups_timer_update", (timer: number) => {
+      setRoom((prev) => (prev ? { ...prev, speedCupsTimer: timer } : null));
+    });
+
+    newSocket.on("player_disconnected_waiting", ({ name }) => {
+      setReconnectWaitingMessage("انقطع اتصال المنافس، انتظر قليلاً!");
+    });
+
+    newSocket.on("player_reconnected", ({ name }) => {
+      setReconnectWaitingMessage(null);
     });
 
     newSocket.on("chat_bubble", async ({ senderId, text }) => {
@@ -6547,7 +8104,7 @@ export default function App() {
           setFunnyFilter(null);
         }, 2000);
       } else {
-        playSound("correct");
+        playSound("correctAnswer");
       }
     });
 
@@ -6558,6 +8115,7 @@ export default function App() {
 
     newSocket.on("game_finished", ({ room, winnerId, updates }) => {
       if (isIntentionalLeaveRef.current) return;
+      setReconnectWaitingMessage(null);
       setRoom(room);
       setCooldowns({});
       setReadyPowerUps([]);
@@ -6689,6 +8247,35 @@ export default function App() {
       setSearchTimeLeft(null);
     });
 
+    newSocket.on(
+      "bus_complete_letter_change_requested",
+      ({ opponentName }) => {
+        showConfirm(
+          `${opponentName} يريد تغيير الحرف`,
+          () => {
+            newSocket.emit("accept_change_bus_complete_letter", {
+              roomId: roomRef.current?.id,
+            });
+          },
+          "طلب تغيير الحرف",
+          () => {
+            newSocket.emit("reject_change_bus_complete_letter", {
+              roomId: roomRef.current?.id,
+            });
+          },
+          "موافقة",
+          "رفض",
+        );
+      },
+    );
+
+    newSocket.on(
+      "bus_complete_letter_change_rejected",
+      ({ opponentName }) => {
+        showAlert(`تم رفض تغيير الحرف من قبل ${opponentName}`, "مرفوض");
+      },
+    );
+
     newSocket.on("game_started", () => {
       setChatHistory([]);
       setCooldowns({});
@@ -6761,6 +8348,7 @@ export default function App() {
     });
 
     newSocket.on("game_stopped", ({ reason }) => {
+      setReconnectWaitingMessage(null);
       setError(reason);
       setTimeout(() => setError(""), 5000);
       setJoined(false);
@@ -6793,7 +8381,10 @@ export default function App() {
       setChatInput("");
     });
 
-    newSocket.on("error", (msg) => setError(msg));
+    newSocket.on("error", (msg) => {
+      setError(msg);
+      setIsJoiningRoom(false);
+    });
 
     newSocket.on("auth_error", () => {
       clearPlayerData();
@@ -7024,6 +8615,7 @@ export default function App() {
         showAlert("اللاعب غير مستعد حالياً أو رفض التحدي.", "تنبيه");
       }
       setIsSearching(false);
+      setRoomId("");
     });
 
     newSocket.on("friend_challenge_accepted", ({ roomId }) => {
@@ -7048,42 +8640,35 @@ export default function App() {
     // Real update check and loading process
     const startLoading = async () => {
       try {
-        setLoadingStatus("جاري الاتصال بالسيرفر...");
+        setLoadingStatus("جاري التحميل أنتظر...");
         setLoadingProgress(10);
 
-        // Fetch real config from server with cache busting
-        const response = await fetch("/api/config?t=" + Date.now());
-        if (!response.ok) throw new Error("Failed to fetch config");
-        const config = await response.json();
+        // Fetch config from server (reusing refreshConfig from AvatarContext)
+        const config = await refreshConfig();
+        if (!config) throw new Error("Failed to fetch config");
 
         // Try to subscribe to push notifications
         // We do it after a short delay to not block loading
-        setTimeout(() => subscribeToPush(), 60000);
+        setTimeout(() => subscribeToPush(), 5000);
 
         const serverVersion = config.version || "1.1.1";
         setGameVersion(serverVersion);
         setLoadingProgress(50);
 
-        // Check maintenance mode with cache busting
+        // Check maintenance mode using config.maintenance instead of making a separate request
         try {
-          const maintenanceResponse = await fetch(
-            "/api/maintenance?t=" + Date.now(),
-          );
-          if (maintenanceResponse.ok) {
-            const maintenanceData = await maintenanceResponse.json();
-            const params = new URLSearchParams(window.location.search);
-            const isAdminInUrl = params.get("isAdmin") === "true";
+          const params = new URLSearchParams(window.location.search);
+          const isAdminInUrl = params.get("isAdmin") === "true";
 
-            if (maintenanceData.maintenance) {
-              if (!isAdmin && !isAdminInUrl) {
-                setIsMaintenanceMode(true);
-                setIsAppLoading(false);
-                return;
-              }
+          if (config.maintenance) {
+            if (!isAdmin && !isAdminInUrl) {
+              setIsMaintenanceMode(true);
+              setIsAppLoading(false);
+              return;
             }
           }
         } catch (err) {
-          console.error("Failed to check maintenance mode:", err);
+          console.error("Failed to check maintenance mode from config:", err);
         }
 
         // Check if we need to force update (reload)
@@ -7102,17 +8687,17 @@ export default function App() {
           setLoadingProgress(100);
           localStorage.setItem("khamin_game_version", serverVersion);
 
-          // Unregister all service workers to force fetching new files
+          // Update all service workers instead of unregistering to preserve push notifications subscription!
           if ("serviceWorker" in navigator) {
             try {
               const registrations =
                 await navigator.serviceWorker.getRegistrations();
               for (let registration of registrations) {
-                console.log("[DEBUG] Unregistering SW:", registration.scope);
-                await registration.unregister();
+                console.log("[DEBUG] Updating SW:", registration.scope);
+                await registration.update();
               }
             } catch (err) {
-              console.error("Error unregistering service worker:", err);
+              console.error("Error updating service worker:", err);
             }
           }
 
@@ -7174,6 +8759,8 @@ export default function App() {
     const newSocket = connectSocket();
 
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const activeSocket = socketRef.current;
+      if (!activeSocket) return;
       if (isIntentionalLeaveRef.current) return;
       if (
         roomRef.current &&
@@ -7182,10 +8769,10 @@ export default function App() {
       ) {
         e.preventDefault();
         e.returnValue = ""; // Required for Chrome
-        newSocket.emit("intentional_leave", { roomId: roomRef.current.id });
+        activeSocket.emit("intentional_leave", { roomId: roomRef.current.id });
 
         const me = roomRef.current?.players.find(
-          (p: any) => p.id === newSocket.id,
+          (p: any) => p.id === activeSocket.id,
         );
         if (me?.useToken) {
           return "تحذير: إذا انسحبت الآن، ستخسر التخمينة المستخدمة! وتعتبر خاسر. هل تريد حقاً مغادرة اللعبة؟";
@@ -7196,9 +8783,13 @@ export default function App() {
 
     window.addEventListener("beforeunload", handleBeforeUnload);
 
+    GameEngineService.setOnRoomUpdate((updatedRoom) => {
+      setRoom(updatedRoom as any);
+    });
+
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
-      newSocket.disconnect();
+      socketRef.current?.disconnect();
     };
   }, [isAppLoading, connectSocket]);
 
@@ -7245,6 +8836,46 @@ export default function App() {
     } else {
       stopSound("tick");
     }
+
+    // Speed cups countdown
+    if (!room) {
+      stopSound("countdownBeep");
+      lastTickTimeRef.current.speedCupsCountdown = -1;
+      return;
+    }
+
+    if (room.gameState === "speed_cups_countdown" && room.speedCupsTimer === 3) {
+      if (lastTickTimeRef.current.speedCupsCountdown !== 3) {
+        playSound("countdownBeep", 0.6);
+        lastTickTimeRef.current.speedCupsCountdown = 3;
+      }
+    } else if (room.gameState === "speed_cups_playing") {
+      if (lastTickTimeRef.current.speedCupsCountdown !== -2) {
+        stopSound("countdownBeep");
+        lastTickTimeRef.current.speedCupsCountdown = -2;
+      }
+    } else if (room.gameState !== "speed_cups_countdown") {
+      stopSound("countdownBeep");
+      lastTickTimeRef.current.speedCupsCountdown = -1;
+    }
+  }, [room?.timer, room?.speedCupsTimer, room?.gameState, playSound, stopSound]);
+
+  // Clock ticking for bus_complete_playing last minute
+  useEffect(() => {
+    if (!room) return;
+    const isBusCompleteHurry = room.gameState === "bus_complete_playing" && room.timer <= 60 && room.timer > 0;
+    
+    if (isBusCompleteHurry) {
+       if (lastTickTimeRef.current.busCompleteHurryStarted !== 1) {
+         playSound("clockTicking", 0.5);
+         lastTickTimeRef.current.busCompleteHurryStarted = 1;
+       }
+    } else {
+       if (lastTickTimeRef.current.busCompleteHurryStarted === 1) {
+         stopSound("clockTicking");
+         lastTickTimeRef.current.busCompleteHurryStarted = 0;
+       }
+    }
   }, [room?.timer, room?.gameState, playSound, stopSound]);
 
   // Quick Guess timer sound
@@ -7277,6 +8908,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        setError(""); // أو الدالة التي تستخدمها لتفريغ قيمة الخطأ مثل setError(null)
+      }, 2000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
   const handleJoin = () => {
     playSound("clickOpen");
     if (!playerSerial) {
@@ -7284,15 +8925,18 @@ export default function App() {
       return;
     }
     if (!playerName.trim() || !playerAge || playerAge < 0) {
-      setError("حقل مفقود! يرجى إدخال اسمك وعمرك أولاً");
+      playSound("wrong");
+      setError("يرجى إدخال اسمك وعمرك أولاً");
       return;
     }
     if (!roomId.trim()) {
+      playSound("wrong");
       setError("حقل مفقود! يرجى إدخال كود الغرفة");
       return;
     }
     if (playerAge <= 12) {
-      setError("عذراً، يجب أن يكون عمرك 13 عاماً أو أكثر للعب.");
+      playSound("wrong");
+      setError("يجب أن يكون عمرك 13 عاماً أو أكثر.");
       return;
     }
     setError("");
@@ -7300,6 +8944,8 @@ export default function App() {
     localStorage.setItem("khamin_player_name", playerName);
     localStorage.setItem("khamin_player_age", playerAge.toString());
     setIsPrivate(true);
+    
+    setIsJoiningRoom(true);
     socket?.emit("join_room", {
       roomId,
       playerName,
@@ -7312,6 +8958,8 @@ export default function App() {
       serial: playerSerial,
     });
     setIsOpponentBlocked(false);
+    
+    setTimeout(() => setIsJoiningRoom(false), 3000);
   };
 
   const handleRandomMatch = () => {
@@ -7321,11 +8969,13 @@ export default function App() {
       return;
     }
     if (!playerName.trim() || !playerAge || playerAge < 0) {
-      setError("حقل مفقود! يرجى إدخال اسمك وعمرك أولاً");
+      playSound("wrong");
+      setError("يرجى إدخال اسمك وعمرك أولاً");
       return;
     }
     if (playerAge <= 12) {
-      setError("عذراً، يجب أن يكون عمرك 13 عاماً أو أكثر للعب.");
+      playSound("wrong");
+      setError("يجب أن يكون عمرك 13 عاماً أو أكثر.");
       return;
     }
     setError("");
@@ -7333,40 +8983,178 @@ export default function App() {
     localStorage.setItem("khamin_player_name", playerName);
     localStorage.setItem("khamin_player_age", playerAge.toString());
     setIsPrivate(false);
-    socket?.emit("find_random_match", {
-      playerId,
-      playerName,
-      avatar,
-      age: playerAge,
-      gender,
-      xp,
-      streak,
-      wins,
-      serial: playerSerial,
-      useToken: getLevel(xp) >= 50 && useToken,
-    });
     setIsOpponentBlocked(false);
+
+    setIsSearching(true);
+    setSearchTimeLeft(60);
+
+    if (socket && isConnected) {
+      socket.emit("find_random_match", {
+        playerId,
+        playerName,
+        avatar,
+        age: playerAge,
+        gender,
+        xp,
+        streak,
+        wins,
+        serial: playerSerial,
+        useToken: getLevel(xp) >= 50 && useToken,
+      });
+    } else {
+      MatchmakingService.findRandomMatch(
+        {
+          id: playerSerial || playerId,
+          name: playerName,
+          avatar: avatar,
+          level: getLevel(xp),
+          gender: gender,
+          age: playerAge,
+          xp: xp,
+          serial: playerSerial,
+        },
+        "general",
+        (statusMsg: string) => {
+          // Status update
+        },
+        3
+      ).then((matchResult) => {
+        if (matchResult) {
+          const matchId = `match_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+          setProposedMatch({
+            matchId,
+            roomId: matchResult.roomId,
+            opponent: matchResult.opponent,
+            opponentAccepted: true,
+            isP2P: matchResult.isP2P,
+            p2pManager: matchResult.p2pManager,
+          } as any);
+          setHasResponded(false);
+          setOpponentAccepted(true);
+          setMatchResponseTimeLeft(10);
+          try {
+            playSound("matchFound");
+          } catch (e) {}
+        }
+      }).catch((err) => {
+        console.warn("Serverless matchmaking error:", err);
+      });
+    }
+  };
+
+
+  const handleProposeMode = (mode: string) => {
+    const isOfflineOrBot = room?.players?.[1]?.isBot || !socket?.connected;
+    if (isOfflineOrBot) {
+      GameEngineService.handleAction("propose_selection_mode", {
+        roomId: room?.id,
+        mode: mode,
+        playerId: socket?.id || playerId,
+      });
+    } else {
+      socket?.emit("propose_selection_mode", {
+        roomId: room?.id,
+        mode: mode,
+      });
+    }
+  };
+
+  const handleServerlessMatchAccept = (currentProposedMatch: any) => {
+    if (!currentProposedMatch) return;
+    const opp = currentProposedMatch.opponent;
+    const myId = socket?.id || playerId;
+    const oppId = opp.id || `bot_${Math.random().toString(36).substr(2, 6)}`;
+    const initialRoom: any = {
+      id: currentProposedMatch.roomId || `room_${Date.now()}`,
+      players: [
+        {
+          id: myId,
+          name: playerName,
+          playerName: playerName,
+          avatar: avatar,
+          age: playerAge,
+          gender: gender,
+          xp: xp,
+          level: getLevel(xp),
+          serial: playerSerial,
+          selectedFrame: selectedFrame,
+          isBot: false,
+        } as any,
+        {
+          id: oppId,
+          name: opp.name,
+          playerName: opp.name,
+          avatar: opp.avatar,
+          age: opp.age || 25,
+          gender: opp.gender || "boy",
+          xp: opp.xp || (opp.level * 100),
+          level: opp.level || 1,
+          serial: opp.serial || oppId,
+          isBot: opp.isBot !== false,
+          disableGuessChat: 1,
+          persona: opp.persona || "",
+          selectedFrame: opp.selectedFrame || "",
+          proPackageExpiry: opp.proPackageExpiry || null,
+          wins: opp.wins || 10,
+          busCompleteWins: opp.busCompleteWins || 5,
+          xoWins: opp.xoWins || 5,
+          handWins: opp.handWins || 5,
+          iqWins: opp.iqWins || 5,
+          dotsWins: opp.dotsWins || 5,
+          speedCupsWins: opp.speedCupsWins || 5,
+          bombPartyWins: opp.bombPartyWins || 5,
+          wordleWins: opp.wordleWins || 5,
+          connectFourWordsWins: opp.connectFourWordsWins || 5,
+          spaceWarWins: opp.spaceWarWins || 5,
+        } as any,
+      ],
+      gameState: "waiting",
+      timer: 60,
+      category: "random",
+      isPaused: false,
+      pausingPlayerId: null,
+      quickGuessTimer: 15,
+      selectionMode: null,
+      isP2P: currentProposedMatch.isP2P,
+      p2pManager: currentProposedMatch.p2pManager,
+      isBot: opp.isBot !== false,
+    };
+    setRoomId(initialRoom.id);
+    setIsPrivate(false);
+    setIsSearching(false);
+    setJoined(true);
+    setProposedMatch(null);
+    setHasResponded(false);
+    setOpponentAccepted(false);
+    setMatchResponseTimeLeft(null);
+    setSearchTimeLeft(null);
+    setRoom(initialRoom);
+    GameEngineService.initRoom(initialRoom);
   };
 
   const handleRegister = () => {
     playSound("clickOpen");
     setRegisterError("");
     if (!playerName.trim() || !playerAge) {
+      playSound("wrong");
       setRegisterError("يرجى إدخال اسمك وعمرك أولاً");
       return;
     }
 
     if (!hasSelectedAvatar) {
+      playSound("wrong");
       setRegisterError("يرجى اختيار افاتار البداية الخاص بك");
       return;
     }
 
     if (!hasSelectedFrame) {
+      playSound("wrong");
       setRegisterError("يرجى اختيار إطار البداية الخاص بك");
       return;
     }
 
     if (!acceptedTerms || !acceptedPrivacy) {
+      playSound("wrong");
       setRegisterError(
         "يجب الموافقة على الشروط والأحكام وسياسة الخصوصية لإنشاء حساب",
       );
@@ -7395,7 +9183,8 @@ export default function App() {
           setPlayerSerial(serial);
           setPlayerName(name); // Update with filtered name
           localStorage.setItem("khamin_player_serial", serial);
-          if (secretToken) localStorage.setItem("khamin_secret_token", secretToken);
+          if (secretToken)
+            localStorage.setItem("khamin_secret_token", secretToken);
           localStorage.setItem("khamin_player_name", name);
           localStorage.setItem("khamin_player_age", playerAge.toString());
           localStorage.setItem("khamin_player_gender", gender);
@@ -7423,9 +9212,16 @@ export default function App() {
             );
           }
 
+          socket?.emit("set_player_serial_for_socket", {
+            serial,
+            fingerprint: localStorage.getItem("khamin_fingerprint"),
+            secretToken,
+          });
+
           socket?.emit("get_city_search", { serial });
 
           setShowWelcomeModal(false);
+          
           playSound("clickClose");
           setError("");
         } else {
@@ -7439,13 +9235,18 @@ export default function App() {
     playSound("clickOpen");
     setLoginError("");
     if (!loginSerial.trim()) {
+      playSound("wrong");
       setLoginError("يرجى إدخال رقم ID اللاعب");
       return;
     }
 
     socket?.emit(
       "get_player_data",
-      { serial: loginSerial.trim(), fingerprint, secretToken: loginToken.trim() || undefined },
+      {
+        serial: loginSerial.trim(),
+        fingerprint,
+        secretToken: loginToken.trim() || undefined,
+      },
       (player: any) => {
         if (player && player.error) {
           setLoginError(player.error);
@@ -7493,13 +9294,19 @@ export default function App() {
 
           fetchCollection(player.serial);
 
-          socket?.emit("set_player_serial_for_socket", player.serial);
+          socket?.emit("set_player_serial_for_socket", {
+            serial: player.serial,
+            fingerprint: localStorage.getItem("khamin_fingerprint"),
+            secretToken: player.secretToken,
+          });
           socket?.emit("get_city_search", { serial: player.serial });
 
           setShowWelcomeModal(false);
+
           playSound("clickClose");
           setError("");
         } else {
+          playSound("wrong");
           setLoginError("رقم ID غير صحيح أو الحساب غير موجود");
         }
       },
@@ -7510,13 +9317,18 @@ export default function App() {
     playSound("clickOpen");
     setProfileLoginError("");
     if (!profileLoginSerial.trim()) {
+      playSound("wrong");
       setProfileLoginError("يرجى إدخال رقم ID اللاعب");
       return;
     }
 
     socket?.emit(
       "get_player_data",
-      { serial: profileLoginSerial.trim(), fingerprint, secretToken: profileLoginToken.trim() || undefined },
+      {
+        serial: profileLoginSerial.trim(),
+        fingerprint,
+        secretToken: profileLoginToken.trim() || undefined,
+      },
       (player: any) => {
         if (player && player.error) {
           setProfileLoginError(player.error);
@@ -7564,16 +9376,22 @@ export default function App() {
 
           fetchCollection(player.serial);
 
-          socket?.emit("set_player_serial_for_socket", player.serial);
+          socket?.emit("set_player_serial_for_socket", {
+            serial: player.serial,
+            fingerprint: localStorage.getItem("khamin_fingerprint"),
+            secretToken: player.secretToken,
+          });
           socket?.emit("get_city_search", { serial: player.serial });
 
           setShowProfileLoginModal(false);
           setProfileLoginSerial("");
           closeAllModals();
+
           playSound("clickClose");
           setError("");
           showAlert("تم تسجيل الدخول بنجاح!", "تسجيل الدخول");
         } else {
+          playSound("wrong");
           setProfileLoginError("رقم ID غير صحيح أو الحساب غير موجود");
         }
       },
@@ -7604,6 +9422,7 @@ export default function App() {
       setIsWaitingForJudgment(true);
     } else {
       socket?.emit("submit_guess", { roomId, guess });
+      GameEngineService.handleAction("submit_guess", { roomId, guess, playerId: socket?.id });
     }
     setGuess("");
   };
@@ -7664,10 +9483,16 @@ export default function App() {
       return;
     }
     setIsCustomSubmitted(true);
-    socket.emit("submit_custom_image", {
+    socket?.emit("submit_custom_image", {
       roomId,
       imageBase64: customImageBase64,
       answer: customImageAnswer.trim(),
+    });
+    GameEngineService.handleAction("submit_custom_image", {
+      roomId,
+      imageBase64: customImageBase64,
+      answer: customImageAnswer.trim(),
+      playerId: socket?.id,
     });
   };
 
@@ -7683,7 +9508,29 @@ export default function App() {
     setJudgmentRequest(null);
   };
 
+  
+  const handleWatchAdForGuessChat = () => {
+    playSound("clickOpen");
+    if (socket && room?.id) {
+      socket.emit("ad_started", { roomId: room.id, powerUpName: "فتح شات الدردشة" });
+    }
+    showAd(
+      room?.id || "",
+      socket?.id || "",
+      () => {
+        setGuessChatUnlocked(true);
+      },
+      undefined,
+      () => {
+        if (socket && room?.id) {
+          socket.emit("ad_ended", { roomId: room.id });
+        }
+      }
+    );
+  };
+
   const handleSendChat = (e: React.FormEvent) => {
+
     e.preventDefault();
     if (!chatInput.trim()) return;
     playSound("clickOpen");
@@ -7705,6 +9552,170 @@ export default function App() {
 
   const adTriggeredRef = useRef(false);
 
+  const handleWatchKeyAd = () => {
+    console.log("handleWatchKeyAd called. Current keyAdStatus:", keyAdStatus);
+
+    if (adTriggeredRef.current || isGlobalAdLoading) return;
+    if (isKeyCooldown) {
+      showAlert("يرجى الانتظار 30 ثانية قبل مشاهدة الإعلان التالي!", "تنبيه");
+      return;
+    }
+
+    if (!keyAdStatus.canWatch) {
+      console.log("Cannot watch key ad: limit reached");
+      showAlert("انتهت المحاولات لهذا اليوم!", "تنبيه");
+      return;
+    }
+
+    // Close confirmation modal immediately to prevent "fixed window" issue
+    setShowAdConfirmation(false);
+
+    // Set triggered to true immediately to prevent double clicks
+    adTriggeredRef.current = true;
+    setIsGlobalAdLoading(true);
+
+    let localAdTriggered = false;
+    const startAdProcess = () => {
+      if (localAdTriggered) return;
+      localAdTriggered = true;
+      setIsGlobalAdLoading(false);
+      socket?.emit("start_ad_watch", { serial: playerSerial });
+    };
+
+    let adSafetyTimeout: NodeJS.Timeout;
+    const onAdComplete = () => {
+      clearTimeout(adSafetyTimeout);
+      adTriggeredRef.current = false;
+      setIsGlobalAdLoading(false);
+
+      // Trigger cooldown after ad finishes
+      setIsKeyCooldown(true);
+      setKeyCooldownTime(30);
+
+      socket?.emit("watch_key_ad_request", { serial: playerSerial });
+    };
+
+    const startMockAd = () => {
+      console.log("Falling back to mock ad");
+      startAdProcess();
+      setMockAdProviderState({
+        onComplete: () => {
+          onAdComplete();
+        },
+        onDismissed: () => {
+          clearTimeout(adSafetyTimeout);
+          adTriggeredRef.current = false;
+          setIsGlobalAdLoading(false);
+          showAlert(
+            "تم إغلاق الإعلان قبل الاكتمال. لن تحصل على مكافأة.",
+            "تنبيه",
+          );
+        },
+      });
+    };
+
+    const handleAdUnavailable = () => {
+      setIsGlobalAdLoading(false);
+      if (sessionAdFailuresCount < 2) {
+        sessionAdFailuresCount += 1;
+        localStorage.setItem(
+          "khamin_ad_failures",
+          sessionAdFailuresCount.toString(),
+        );
+        showAlert("عذراً، انتظر قليلاً وحاول مرة أخرى", "تنبيه");
+        adTriggeredRef.current = false;
+        return;
+      }
+      sessionAdFailuresCount = 0;
+      localStorage.setItem("khamin_ad_failures", "0");
+      console.warn(
+        "Google Ads unavailable, falling back to mock ad temporarily",
+      );
+      startMockAd();
+    };
+
+    // Call real AdSense adBreak if available
+    if (typeof window.adBreak === "function") {
+      console.log("Calling Google AdSense adBreak");
+      // Set a safety timeout: if AdSense doesn't trigger beforeAd within 12 seconds, use fallback
+      const adTimeout = setTimeout(() => {
+        if (!localAdTriggered) {
+          console.warn("AdSense adBreak timed out, using fallback");
+          handleAdUnavailable();
+        }
+      }, 12000);
+
+      try {
+        window.adBreak({
+          type: "reward",
+          name: "get_key",
+          beforeAd: () => {
+            console.log("AdSense: beforeAd");
+            clearTimeout(adTimeout);
+            if (localAdTriggered) {
+              console.log("AdSense started late, closing mock ad");
+              setMockAdProviderState(null);
+            }
+            localAdTriggered = false;
+            setIsGlobalAdLoading(false);
+            startAdProcess();
+
+            // Safety timeout: if ad doesn't finish or dismiss within 60 seconds, resume game
+            adSafetyTimeout = setTimeout(() => {
+              console.warn("AdSense ad stuck, resuming game");
+              setIsGlobalAdLoading(false);
+              adTriggeredRef.current = false;
+              showAlert("حدث خطأ أثناء تحميل الإعلان.", "خطأ");
+            }, 60000);
+          },
+          afterAd: () => {
+            console.log("AdSense: afterAd");
+          },
+          beforeReward: (showAdFn: any) => {
+            console.log("AdSense: beforeReward");
+            showAdFn();
+          },
+          adDismissed: () => {
+            console.log("AdSense: adDismissed");
+            clearTimeout(adSafetyTimeout);
+            adTriggeredRef.current = false;
+            setIsGlobalAdLoading(false);
+            showAlert(
+              "تم إغلاق الإعلان قبل الاكتمال. لن تحصل على مكافأة.",
+              "تنبيه",
+            );
+          },
+          adViewed: () => {
+            console.log("AdSense: adViewed");
+            sessionAdFailuresCount = 0;
+            localStorage.setItem("khamin_ad_failures", "0");
+            onAdComplete();
+          },
+          adBreakDone: (placementInfo: any) => {
+            console.log("AdSense: adBreakDone", placementInfo);
+            setIsGlobalAdLoading(false);
+            // If adBreakDone is called but ad was never triggered, it means no ad was available
+            if (!localAdTriggered) {
+              clearTimeout(adTimeout);
+              console.warn(
+                "AdSense adBreakDone called without triggering ad, using fallback",
+              );
+              handleAdUnavailable();
+            } else {
+              adTriggeredRef.current = false;
+            }
+          },
+        });
+      } catch (error) {
+        console.error("Error calling window.adBreak:", error);
+        clearTimeout(adTimeout);
+        handleAdUnavailable();
+      }
+    } else {
+      // Fallback if AdSense is blocked or not loaded
+      handleAdUnavailable();
+    }
+  };
   const handleWatchAd = () => {
     console.log("handleWatchAd called. Current adStatus:", adStatus);
 
@@ -7928,6 +9939,111 @@ export default function App() {
       handleAdUnavailable();
     }
   };
+
+  const triggerMatchAd = useCallback(() => {
+    if (hasProPackage) {
+      setMatchAdState({ show: false, timer: 0, adFailed: false, adStarted: false });
+      localStorage.removeItem("khamin_pending_match_ad");
+      return;
+    }
+
+    setMatchAdState(prev => ({ ...prev, adStarted: true, adFailed: false }));
+    
+    if (typeof (window as any).adBreak === "function") {
+      let adFinished = false;
+      let adViewed = false;
+      let adDismissed = false;
+      
+      const handleAdFailure = () => {
+        localStorage.removeItem("khamin_pending_match_ad");
+        setMatchAdState({ show: false, timer: 0, adFailed: false, adStarted: false });
+      };
+
+      const adTimeout = setTimeout(() => {
+        if (!adFinished) handleAdFailure();
+      }, 12000);
+
+      try {
+        (window as any).adBreak({
+          type: "reward",
+          name: "match_interval_ad",
+          beforeAd: () => {
+            clearTimeout(adTimeout);
+          },
+          beforeReward: (showAdFn: any) => showAdFn(),
+          afterAd: () => {},
+          adDismissed: () => {
+            adFinished = true;
+            adDismissed = true;
+            localStorage.setItem("khamin_pending_match_ad", "true");
+            setMatchAdState(prev => ({ ...prev, adFailed: true, adStarted: false }));
+          },
+          adViewed: () => {
+            adFinished = true;
+            adViewed = true;
+            localStorage.removeItem("khamin_pending_match_ad");
+            setMatchAdState({ show: false, timer: 0, adFailed: false, adStarted: false });
+          },
+          adBreakDone: (placementInfo: any) => {
+            adFinished = true;
+            clearTimeout(adTimeout);
+            if (!adViewed && !adDismissed) {
+               localStorage.removeItem("khamin_pending_match_ad");
+               setMatchAdState({ show: false, timer: 0, adFailed: false, adStarted: false });
+            }
+          }
+        });
+      } catch(e) {
+        clearTimeout(adTimeout);
+        handleAdFailure();
+      }
+    } else {
+      localStorage.removeItem("khamin_pending_match_ad");
+      setMatchAdState({ show: false, timer: 0, adFailed: false, adStarted: false });
+    }
+  }, [hasProPackage]);
+
+  useEffect(() => {
+    if (room && room.gameState !== previousGameStateRef.current) {
+      if (room.gameState === "xo_finished" || room.gameState === "bus_complete_evaluating" || room.gameState === "finished" || room.gameState === "hand_finished" || room.gameState === "iq_finished" || room.gameState === "dots_finished" || room.gameState === "bus_complete_finished" || room.gameState === "speed_cups_finished" || room.gameState === "bomb_party_finished" || room.gameState === "wordle_finished" || room.gameState === "connect_four_words_finished" || room.gameState === "space_war_finished" || room.gameState === "puzzle_finished" || room.gameState === "beach_race_finished") {
+        if (!hasProPackage) {
+          const increment = (room.gameState === "puzzle_finished" || room.gameState === "bus_complete_finished") ? 3 : 1;
+          matchesPlayedRef.current += increment;
+          if (matchesPlayedRef.current >= 3) {
+            matchesPlayedRef.current = 0;
+            localStorage.setItem("khamin_pending_match_ad", "true");
+            setMatchAdState({ show: true, timer: 3, adFailed: false, adStarted: false });
+          }
+        }
+      } else if (room.gameState === "waiting" && localStorage.getItem("khamin_pending_match_ad") === "true" && !hasProPackage) {
+        setMatchAdState({ show: true, timer: 0, adFailed: true, adStarted: false });
+      }
+      previousGameStateRef.current = room.gameState;
+    }
+  }, [room?.gameState, hasProPackage]);
+
+  useEffect(() => {
+    if (matchAdState.show && matchAdState.timer > 0 && !matchAdState.adStarted && !matchAdState.adFailed) {
+      const timerId = setTimeout(() => {
+        setMatchAdState(prev => ({ ...prev, timer: prev.timer - 1 }));
+      }, 1000);
+      return () => clearTimeout(timerId);
+    } else if (matchAdState.show && matchAdState.timer === 0 && !matchAdState.adStarted && !matchAdState.adFailed) {
+      triggerMatchAd();
+    }
+  }, [matchAdState.show, matchAdState.timer, matchAdState.adStarted, matchAdState.adFailed, triggerMatchAd]);
+
+  useEffect(() => {
+    if (matchAdState.show) {
+      if (room?.id) {
+        socket?.emit("ad_started", { roomId: room.id, powerUpName: "تجهيز مباراة" });
+      }
+    } else {
+      if (room?.id) {
+        socket?.emit("ad_ended", { roomId: room.id });
+      }
+    }
+  }, [matchAdState.show, room?.id, socket]);
 
   const handleWatchCategoryAd = useCallback(() => {
     if (adTriggeredRef.current) return;
@@ -8583,6 +10699,127 @@ export default function App() {
     }
   };
 
+  const showBusCompleteAd = (onComplete: () => void, onFailed?: () => void) => {
+    if (adTriggeredRef.current || isGlobalAdLoading) return;
+    adTriggeredRef.current = true;
+    setIsGlobalAdLoading(true);
+
+    let adFinished = false;
+    let adViewed = false;
+    let adDismissed = false;
+
+    const startAdProcess = () => {
+      socket?.emit("start_ad_watch", { serial: playerSerial });
+    };
+
+    let adSafetyTimeout: NodeJS.Timeout;
+
+    const onAdComplete = () => {
+      clearTimeout(adSafetyTimeout);
+      adTriggeredRef.current = false;
+      setIsGlobalAdLoading(false);
+      onComplete();
+    };
+
+    const handleAdFailure = () => {
+      adTriggeredRef.current = false;
+      setIsGlobalAdLoading(false);
+      if (sessionAdFailuresCount < 2) {
+        sessionAdFailuresCount += 1;
+        localStorage.setItem(
+          "khamin_ad_failures",
+          sessionAdFailuresCount.toString(),
+        );
+        showAlert("عذراً، انتظر قليلاً وحاول مرة أخرى", "تنبيه");
+        return;
+      }
+      sessionAdFailuresCount = 0;
+      localStorage.setItem("khamin_ad_failures", "0");
+      setMockAdProviderState({
+        onComplete: () => {
+          onAdComplete();
+        },
+        onDismissed: () => {
+          adFinished = true;
+          adDismissed = true;
+          clearTimeout(adSafetyTimeout);
+          adTriggeredRef.current = false;
+          setIsGlobalAdLoading(false);
+          showAlert("يجب مشاهدة الاعلان كاملا لاستلام الهدايا", "تنبيه");
+          if (onFailed) onFailed();
+        },
+      });
+    };
+
+    if (typeof (window as any).adBreak === "function") {
+      const adTimeout = setTimeout(() => {
+        if (!adFinished) {
+          handleAdFailure();
+        }
+      }, 12000);
+
+      try {
+        (window as any).adBreak({
+          type: "reward",
+          name: "bus_complete_solve_ad",
+          beforeAd: () => {
+            clearTimeout(adTimeout);
+            if (adFinished) {
+              setMockAdProviderState(null);
+            }
+            adFinished = false;
+            startAdProcess();
+            Howler.mute(true);
+
+            adSafetyTimeout = setTimeout(() => {
+              onAdComplete();
+            }, 60000);
+          },
+          afterAd: () => {
+            Howler.mute(false);
+          },
+          beforeReward: (showAdFn: any) => {
+            showAdFn();
+          },
+          adDismissed: () => {
+            adFinished = true;
+            adDismissed = true;
+            clearTimeout(adSafetyTimeout);
+            adTriggeredRef.current = false;
+            setIsGlobalAdLoading(false);
+            showAlert("يجب مشاهدة الاعلان كاملا لاستلام الهدايا", "تنبيه");
+            if (onFailed) onFailed();
+          },
+          adViewed: () => {
+            sessionAdFailuresCount = 0;
+            localStorage.setItem("khamin_ad_failures", "0");
+            adFinished = true;
+            adViewed = true;
+            clearTimeout(adSafetyTimeout);
+            onAdComplete();
+          },
+          adBreakDone: (placementInfo: any) => {
+            adFinished = true;
+            setIsGlobalAdLoading(false);
+            clearTimeout(adSafetyTimeout);
+            clearTimeout(adTimeout);
+            if (!adViewed && !adDismissed) {
+              // Google AdSense had no ad to show (No Fill)
+              handleAdFailure();
+            } else {
+              adTriggeredRef.current = false;
+            }
+          },
+        });
+      } catch (e) {
+        clearTimeout(adTimeout);
+        handleAdFailure();
+      }
+    } else {
+      handleAdFailure();
+    }
+  };
+
   const [isCitySearchStarting, setIsCitySearchStarting] = useState(false);
 
   const handleStartCitySearch = () => {
@@ -8634,10 +10871,12 @@ export default function App() {
   const handleStartGame = () => {
     playSound("clickOpen");
     socket?.emit("request_match_intro", { roomId });
+    GameEngineService.handleAction("request_match_intro", { roomId });
   };
 
   const handleMatchIntroStart = useCallback(() => {
     socket?.emit("force_start_game", { roomId });
+    GameEngineService.handleAction("force_start_game", { roomId });
   }, [roomId, socket]);
 
   const handleMatchIntroComplete = useCallback(() => {
@@ -8645,6 +10884,11 @@ export default function App() {
   }, []);
 
   const resetToHome = () => {
+    stopSound("countdownBeep");
+    stopSound("tick");
+    stopSound("clockTicking");
+    stopSound("bombFuse");
+    stopSound("deskBell");
     setJoined(false);
     setRoom(null);
     setRoomId("");
@@ -8659,6 +10903,14 @@ export default function App() {
     setIsWatchingCategoryAd(false);
     setShowCategoryAdButton(false);
     setShowMatchIntro(false);
+    setBusAnswers({
+      boy: "",
+      girl: "",
+      animal: "",
+      plant: "",
+      inanimate: "",
+      country: "",
+    });
     setReadyPowerUps([]);
     setCooldowns({
       quick_guess: 0,
@@ -8677,21 +10929,145 @@ export default function App() {
     }
   };
 
+  const showAd = (roomId: string, playerId: string, callback: () => void, onStart?: () => void, onEnd?: () => void) => {
+    let adViewed = false;
+    let adStarted = false;
+    let adHandled = false;
+
+    const handleAdDismissed = () => {
+      if (adHandled) return;
+      adHandled = true;
+      Howler.mute(false);
+      if (onEnd) onEnd();
+      showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+    };
+
+    const handleAdFailedOrNotReady = () => {
+      if (adHandled) return;
+      adHandled = true;
+      Howler.mute(false);
+      if (onEnd) onEnd();
+      setMockAdProviderState({
+        onComplete: () => {
+          callback();
+        },
+        onDismissed: () => {
+          showAlert("يجب مشاهدة الإعلان كاملاً للحصول على المكافأة.", "تنبيه");
+        },
+      });
+    };
+
+    if (typeof (window as any).adBreak === "function") {
+      try {
+        (window as any).adBreak({
+          type: "reward",
+          name: "rewarded_ad",
+          beforeAd: () => {
+            adStarted = true;
+            (window as any).adStartTime = Date.now();
+            Howler.mute(true);
+            if (onStart) onStart();
+          },
+          afterAd: () => {
+            Howler.mute(false);
+            if (onEnd) onEnd();
+          },
+          beforeReward: (showAdFn: any) => {
+            showAdFn();
+          },
+          adViewed: () => {
+            if (adHandled) return;
+            adViewed = true;
+            adHandled = true;
+            Howler.mute(false);
+            if (onEnd) onEnd();
+            callback();
+          },
+          adDismissed: () => {
+            if (!adViewed) {
+              handleAdDismissed();
+            }
+          },
+          adBreakDone: (placementInfo: any) => {
+            if (!adViewed && !adHandled) {
+              if (adStarted) {
+                handleAdDismissed();
+              } else {
+                handleAdFailedOrNotReady();
+              }
+            }
+          }
+        });
+      } catch (err) {
+        console.error(err);
+        handleAdFailedOrNotReady();
+      }
+    } else {
+      setMockAdProviderState({
+        onComplete: () => {
+          if (onStart) onStart();
+          if (onEnd) onEnd();
+          callback();
+        },
+        onDismissed: () => {
+          if (onEnd) onEnd();
+          showAlert("يجب مشاهدة الإعلان كاملاً للحصول على المكافأة.", "تنبيه");
+        },
+      });
+    }
+  };
+
   const handleLeaveGame = () => {
     playSound("clickOpen");
     const isGameActive =
       room?.gameState === "guessing" ||
       room?.gameState === "discussion" ||
-      room?.gameState === "custom_image_upload";
+      room?.gameState === "custom_image_upload" ||
+      room?.gameState === "bomb_party_setup" ||
+      room?.gameState === "bomb_party_playing" ||
+      room?.gameState === "bomb_party_finished" ||
+      room?.gameState === "xo_playing" ||
+      room?.gameState === "xo_finished" ||
+      room?.gameState === "iq_playing" ||
+      room?.gameState === "iq_finished" ||
+      room?.gameState === "dots_playing" ||
+      room?.gameState === "dots_finished" ||
+      room?.gameState === "bus_complete_setup" ||
+      room?.gameState === "bus_complete_spin" ||
+      room?.gameState === "bus_complete_playing" ||
+      room?.gameState === "bus_complete_evaluating" ||
+      room?.gameState === "hand_playing" ||
+      room?.gameState === "hand_finished" ||
+      room?.gameState?.startsWith("speed_cups_") ||
+      room?.gameState === "wordle_setup" ||
+      room?.gameState === "wordle_playing" ||
+      room?.gameState === "wordle_finished" ||
+      room?.gameState === "connect_four_words_setup" ||
+      room?.gameState === "connect_four_words_playing" ||
+      room?.gameState === "connect_four_words_finished" ||
+      room?.gameState?.startsWith("space_war_") ||
+      room?.gameState === "puzzle_setup" ||
+      room?.gameState === "puzzle_playing" ||
+      room?.gameState === "puzzle_finished"||
+      room?.gameState === "beach_race_setup" ||
+      room?.gameState === "beach_race_playing" ||
+      room?.gameState === "beach_race_finished";
+
     const me = room?.players.find((p) => p.id === socket?.id);
 
     // Only show confirmation if the game is active (playing)
     if (isGameActive) {
       let message = "هل تريد حقاً مغادرة اللعبة والعودة للرئيسية؟";
-      if (me?.useToken) {
+      if (me?.useToken && (room?.gameState === "guessing" || room?.gameState === "discussion")) {
         message =
           "تحذير: إذا انسحبت الآن، ستخسر التخمينة المستخدمة! وتعتبر خاسر. هل تريد حقاً مغادرة اللعبة والعودة للرئيسية؟";
-      } else {
+      } else if (
+        room?.gameState === "guessing" ||
+        room?.gameState === "discussion" ||
+        room?.gameState === "custom_image_upload" ||
+        room?.gameState === "bomb_party_playing" ||
+        room?.gameState?.startsWith("space_war_")
+      ) {
         message =
           "انسحابك من المبارة تعتبر خاسر. هل تريد حقاً مغادرة اللعبة والعودة للرئيسية؟";
       }
@@ -8701,8 +11077,16 @@ export default function App() {
         () => {
           isIntentionalLeaveRef.current = true;
           socket?.emit("intentional_leave", { roomId });
-          socket?.emit("leave_room", { roomId }, () => {
+          let forced = false;
+          const forceTimeout = setTimeout(() => {
+            forced = true;
             resetToHome();
+          }, 600);
+          socket?.emit("leave_room", { roomId }, () => {
+            if (!forced) {
+              clearTimeout(forceTimeout);
+              resetToHome();
+            }
           });
         },
         "تأكيد الخروج",
@@ -8711,12 +11095,21 @@ export default function App() {
     }
 
     isIntentionalLeaveRef.current = true;
-    socket?.emit("leave_room", { roomId }, () => {
+    socket?.emit("intentional_leave", { roomId });
+    let forced = false;
+    const forceTimeout = setTimeout(() => {
+      forced = true;
       resetToHome();
+    }, 600);
+    socket?.emit("leave_room", { roomId }, () => {
+      if (!forced) {
+        clearTimeout(forceTimeout);
+        resetToHome();
+      }
     });
   };
 
-  const useCard = (
+  const handleUseCard = (
     type:
       | "quick_guess"
       | "hint"
@@ -9265,7 +11658,7 @@ export default function App() {
     }
     setIsSendingContact(true);
     try {
-      const response = await fetch("/api/contact", {
+      const response = await fetch(apiUrl("/api/contact"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -9459,9 +11852,9 @@ export default function App() {
                   <div className="grid grid-cols-1 md:grid-cols-1 gap-3 w-full content-start">
                     {playerSearchResults
                       .filter((p) => p.serial !== playerSerial)
-                      .map((player) => (
+                      .map((player, idx) => (
                         <div
-                          key={player.serial}
+                          key={player.serial || player.id || `player-${idx}`}
                           className="bg-white border-2 border-game p-3 rounded-xl flex items-center justify-between shadow-sm cursor-pointer hover:bg-amber-50/50 transition-colors"
                           onClick={() => {
                             playSound("clickOpen");
@@ -9610,8 +12003,8 @@ export default function App() {
                 className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar"
                 onScroll={(e) => {
                   const bottom =
-                    e.currentTarget.scrollHeight - e.currentTarget.scrollTop ===
-                    e.currentTarget.clientHeight;
+                    e.currentTarget.scrollHeight - e.currentTarget.scrollTop <=
+                    e.currentTarget.clientHeight + 5;
                   if (
                     bottom &&
                     !friendsLoading &&
@@ -9627,9 +12020,9 @@ export default function App() {
                   </div>
                 ) : (
                   <>
-                    {filteredFriends.map((friend) => (
+                    {filteredFriends.map((friend, idx) => (
                       <div
-                        key={friend.serial}
+                        key={friend.serial || `friend-${idx}`}
                         className="bg-gray-50 border-2 border-gray-100 p-2 rounded-xl flex items-center justify-between shadow-sm"
                       >
                         <div
@@ -10174,19 +12567,7 @@ export default function App() {
                       </div>
 
                       {collectionNotifications.map((notification) => {
-                        const found = adminImages.find(
-                          (img) =>
-                            img.category === notification.category_id &&
-                            normalizeEgyptian(img.name).toLowerCase() ===
-                              normalizeEgyptian(
-                                notification.image_name,
-                              ).toLowerCase(),
-                        );
-                        const imageSrc = found?.data
-                          ? found.data.startsWith("data:")
-                            ? found.data
-                            : `data:image/png;base64,${found.data}`
-                          : `/icon-3.png`;
+                        const imageSrc = apiUrl(`/api/image/${encodeURIComponent(notification.category_id)}/${encodeURIComponent(notification.image_name)}`);
                         const normName = normalizeEgyptian(
                           notification.image_name,
                         ).toLowerCase();
@@ -10365,7 +12746,7 @@ export default function App() {
             className="bg-modal-theme rounded-[2xl] w-full max-w-sm overflow-hidden shadow-2xl relative flex flex-col"
             dir="rtl"
           >
-            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-3 text-center relative shrink-0 border-b-4 border-black">
+            <div className="bg-purple-600 p-3 pt-3 py-2 text-center relative shrink-0 border-b-4 border-black">
               <button
                 onClick={() => {
                   playSound("clickClose");
@@ -10484,60 +12865,64 @@ export default function App() {
                   </button>
                 )}
               </h2>
-              <div className="text-white/90 text-sm font-bold flex items-center justify-center gap-2 mt-1 mb-3">
-                <span className="bg-black/20 px-2 py-0.5 rounded-md" dir="ltr">
+              <div className="flex justify-center items-center mt-1.5 mb-1.5">
+                <span className="text-white bg-black/25 px-3 py-1 rounded-full text-xs font-black shadow-inner" dir="ltr">
                   Lvl {data.level}
                 </span>
-                <span>•</span>
-                <span>{data.wins} فوز</span>
-                <span>•</span>
-                <span>{data.streak} 🔥</span>
               </div>
 
-              {/* Add Friend Button */}
+              {/* Friend Status Indicator / Add Friend Button */}
               {data.serial !== playerSerial &&
-                friendStatus !== "friends" &&
                 !data.isAdmin &&
                 !data.isBlocked &&
-                !data.hasBlockedMe &&
-                (!data.hideFriendRequests || friendStatus !== "none") && (
-                  <button
-                    disabled={friendStatus !== "none"}
-                    onClick={() => {
-                      if (friendStatus === "none") {
-                        playSound("clickOpen");
-                        handleAddFriend(data.serial);
-                        setSelectedProfileSerial(null);
-                      }
-                    }}
-                    className={`w-full max-w-[200px] mx-auto py-2 rounded-xl font-black text-xs flex items-center justify-center gap-2 transition-all ${
-                      friendStatus === "pending_sent"
-                        ? "bg-orange-100 text-orange-700 border-2 border-orange-200"
-                        : friendStatus === "pending_received"
-                          ? "bg-blue-100 text-blue-700 border-2 border-blue-200"
-                          : "bg-white text-purple-700 hover:bg-gray-100 shadow-md border-b-2 border-gray-300 active:translate-y-px active:border-b-0 target-add-btn"
-                    }`}
-                  >
-                    {friendStatus === "pending_sent" ? (
-                      <>
-                        <Clock className="w-4 h-4" /> طلب صداقة مرسل
-                      </>
-                    ) : friendStatus === "pending_received" ? (
-                      <>
-                        <Users className="w-4 h-4" /> لديه طلب لك بالصداقة
-                      </>
+                !data.hasBlockedMe && (
+                  <>
+                    {friendStatus === "friends" ? (
+                      <div className="w-full max-w-[200px] mx-auto py-2 rounded-xl font-black text-xs flex items-center justify-center gap-2 bg-green-100 text-green-700 border-2 border-green-200">
+                        <Users className="w-4 h-4" /> صديق
+                      </div>
                     ) : (
-                      <>
-                        <UserPlus className="w-4 h-4" /> إضافة صديق
-                      </>
+                      (!data.hideFriendRequests || friendStatus !== "none") && (
+                        <button
+                          disabled={friendStatus !== "none"}
+                          onClick={() => {
+                            if (friendStatus === "none") {
+                              playSound("clickOpen");
+                              handleAddFriend(data.serial);
+                              setSelectedProfileSerial(null);
+                            }
+                          }}
+                          className={`w-full max-w-[200px] mx-auto py-2 rounded-xl font-black text-xs flex items-center justify-center gap-2 transition-all ${
+                            friendStatus === "pending_sent"
+                              ? "bg-orange-100 text-orange-700 border-2 border-orange-200"
+                              : friendStatus === "pending_received"
+                                ? "bg-blue-100 text-blue-700 border-2 border-blue-200"
+                                : "bg-white text-purple-700 hover:bg-gray-100 shadow-md border-b-2 border-gray-300 active:translate-y-px active:border-b-0 target-add-btn"
+                          }`}
+                        >
+                          {friendStatus === "pending_sent" ? (
+                            <>
+                              <Clock className="w-4 h-4" /> طلب صداقة مرسل
+                            </>
+                          ) : friendStatus === "pending_received" ? (
+                            <>
+                              <Users className="w-4 h-4" /> لديه طلب لك بالصداقة
+                            </>
+                          ) : (
+                            <>
+                              <UserPlus className="w-4 h-4" /> إضافة صديق
+                            </>
+                          )}
+                        </button>
+                      )
                     )}
-                  </button>
+                  </>
                 )}
             </div>
 
-            <div className="p-2 space-y-4 bg-gray-50 flex-1 overflow-y-auto max-h-[60vh]">
+            <div className="p-2 pt-1 py-1 space-y-4 bg-gray-50 flex-1 overflow-y-auto max-h-[60vh]">
               {/* Likes Feature */}
-              <div className="bg-white rounded-xl p-2 border-2 border-gray-100 shadow-sm flex items-center justify-between">
+              <div className="bg-white rounded-xl p-1.5 border-2 border-gray-100 shadow-sm flex items-center justify-between mb-1">
                 <div className="flex flex-col">
                   <div className="flex items-center gap-2">
                     <Heart className="w-5 h-5 text-red-500 fill-red-500" />
@@ -10654,6 +13039,126 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Player Stats Block */}
+                <div className="bg-white rounded-xl p-2 px-1 mb-2 border-2 border-gray-100 shadow-sm relative">
+                  <h3 className="text-xs font-black text-brown-muted mb-1 text-center">
+                    إحصائيات اللاعب
+                  </h3>
+                  <div className="grid grid-cols-1 gap-0 text-xs font-bold text-gray-700">
+                    <div className="bg-gray-300 p-1">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span>🖼️</span>
+                        <span className="text-[14px] text-black font-extrabold">فئات التخمين</span>
+                      </span>
+                      <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50 pr-6">
+                        <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                          <span>🏆</span>
+                          <span className="text-gray-500 font-extrabold">فوز</span>
+                        </span>
+                        <span className="font-black text-brown-dark">{data.wins || 0}</span>
+                      </div>
+                      <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50 pr-6">
+                        <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                          <span>🔥</span>
+                          <span className="text-gray-500 font-extrabold">فوز متتالي</span>
+                        </span>
+                        <span className="font-black text-brown-dark">{data.streak || 0}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span>❤️</span>
+                        <span className="text-gray-500 font-extrabold">إعجابات</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.likes || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span>🚌</span>
+                        <span className="text-gray-500 font-extrabold">تخمينة كومبليت</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.busCompleteWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span><span className="text-red-500 font-black">X</span><span className="text-green-600 font-black">O</span></span>
+                        <span className="text-gray-500 font-extrabold">تخمينة XO</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.xoWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span>🖐</span>
+                        <span className="text-gray-500 font-extrabold">تخمينة كف يد</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.handWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span className="font-black"><span className="text-blue-500">I</span><span className="text-purple-600">Q</span></span>
+                        <span className="text-gray-500 font-extrabold">تخمينة IQ</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.iqWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <img src="/dots-and-boxes-logo.png" className="w-3 h-3 object-contain inline" />
+                        <span className="text-gray-500 font-extrabold">تخمينة نقطة وخط</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.dotsWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <img src="/speed-cups/speed-cups-logo.png" className="w-3.5 h-3.5 object-contain inline" />
+                        <span className="text-gray-500 font-extrabold">أكواب السرعة</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.speedCupsWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span>💣</span>
+                        <span className="text-gray-500 font-extrabold">قنبلة التخمين</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.bombPartyWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <img src="/word-le-logo.png" className="w-3.5 h-3.5 object-contain inline" />
+                        <span className="text-gray-500 font-extrabold">تخمينة كلمة لي</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.wordleWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <img src="/connect-4-logo.png" className="w-3.5 h-3.5 object-contain inline" />
+                        <span className="text-gray-500 font-extrabold">تخمينة 4 حروف</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.connectFourWordsWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span className="w-3.5 h-3.5 inline text-center">🚀</span>
+                        <span className="text-gray-500 font-extrabold">حرب الفضاء</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.spaceWarWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span className="w-3.5 h-3.5 inline text-center">🧩</span>
+                        <span className="text-gray-500 font-extrabold">تخمينة puzzle</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.puzzleWins || 0}</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-gray-50 p-1 rounded-xl border-b-1 border-gray-100/50">
+                      <span className="flex items-center gap-1.5 text-[11px] md:text-xs">
+                        <span className="w-3.5 h-3.5 inline text-center">🐇</span>
+                        <span className="text-gray-500 font-extrabold">سباق التخمين</span>
+                      </span>
+                      <span className="font-black text-brown-dark">{data.beachRaceWins || 0}</span>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Titles */}
                 <div className="bg-white rounded-xl p-2 mb-2 border-2 border-gray-100 shadow-sm">
                   <h3 className="text-xs font-black text-brown-muted mb-2 text-center">
@@ -10718,8 +13223,66 @@ export default function App() {
     );
   };
 
+  const renderMatchIntervalAdModal = () => {
+    if (!matchAdState.show) return null;
+
+    return (
+      <div className="fixed inset-0 bg-black/95 backdrop-blur-md z-[9999] flex flex-col items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-[#FFF9F0] border-4 border-[#8B4513] p-6 md:p-8 rounded-3xl text-center max-w-sm w-full space-y-5 shadow-[0_0_40px_rgba(139,69,19,0.3)]"
+          dir="rtl"
+        >
+          <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-2 border-2 border-blue-300">
+            <span className="text-3xl">📺</span>
+          </div>
+          
+          <h3 className="text-xl md:text-2xl font-black text-[#8B4513] leading-tight">
+            جاري تجهيز المباراة التالية...
+          </h3>
+          <p className="text-sm md:text-base text-gray-600 font-bold px-2">
+            شاهد الإعلان القصير للاستمرار!
+          </p>
+          
+          <div className="h-[80px] flex items-center justify-center">
+            {matchAdState.adFailed ? (
+              <button 
+                className="w-full py-4 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-2xl font-black text-lg transition-all shadow-[0_4px_0_rgb(37,99,235)] active:translate-y-1 active:shadow-none"
+                onClick={() => triggerMatchAd()}
+              >
+                استكمال الاعلان للاستمرار 📺
+              </button>
+            ) : matchAdState.timer > 0 ? (
+              <div className="relative w-20 h-20 flex items-center justify-center mx-auto">
+                <svg className="absolute inset-0 w-full h-full -rotate-90">
+                  <circle cx="40" cy="40" r="36" className="stroke-gray-200" strokeWidth="8" fill="none" />
+                  <circle 
+                    cx="40" 
+                    cy="40" 
+                    r="36" 
+                    className="stroke-blue-500 transition-all duration-1000" 
+                    strokeWidth="8" 
+                    fill="none" 
+                    strokeDasharray={`${2 * Math.PI * 36}`}
+                    strokeDashoffset={`${2 * Math.PI * 36 * (1 - matchAdState.timer / 3)}`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <span className="text-3xl font-black text-blue-600 animate-pulse">{matchAdState.timer}</span>
+              </div>
+            ) : (
+               <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+            )}
+          </div>
+        </motion.div>
+      </div>
+    );
+  };
+
   const renderModals = () => (
     <>
+      {renderMatchIntervalAdModal()}
       {renderPlayerProfileModal()}
       {renderFriendsModal()}
       {renderPlayerSearchModal()}
@@ -11443,6 +14006,57 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* Free Ad Reward - Keys - Any Level */}
+                  <div className="flex items-center justify-between py-3 p-2 md:p-4 border-2 border-game box-game relative overflow-hidden mb-4">
+                    <div
+                      className="absolute top-0 left-0 bg-accent-yellow text-black text-[10px] font-bold px-1 py-0.5 rounded-bl-xl shadow-sm z-10"
+                      dir="ltr"
+                    >
+                      مجاناً (لجميع المستويات)
+                    </div>
+                    <div className="flex items-center gap-1.5 relative z-10">
+                      <div className="w-12 h-12 bg-yellow-100 rounded-xl flex items-center justify-center shadow-sm border border-yellow-300 animate-pulse">
+                        <Key className="w-6 h-6 text-yellow-600" />
+                      </div>
+                      <div>
+                        <div className="font-bold text-[13px] md:text-lg text-brown-dark">
+                          شاهد إعلان = 1 مفتاح
+                        </div>
+                        <div className="text-xs font-bold text-brown-muted">
+                          متبقي لك اليوم:{" "}
+                          <span className="text-yellow-600">
+                            {5 - keyAdStatus.adsWatched}/5
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleWatchKeyAd}
+                      disabled={
+                        isKeyCooldown ||
+                        !keyAdStatus.canWatch ||
+                        isGlobalAdLoading
+                      }
+                      className={`px-2 py-1 rounded-xl font-black text-sm transition-all shadow-md relative z-10 flex items-center justify-center gap-1 ${
+                        !isKeyCooldown &&
+                        keyAdStatus.canWatch &&
+                        !isGlobalAdLoading
+                          ? "bg-yellow-500 text-white hover:scale-105 active:scale-95 shadow-[0_4px_0_0_#ca8a04]"
+                          : "bg-gray-300 text-brown-muted cursor-not-allowed shadow-[0_4px_0_0_#9ca3af]"
+                      }`}
+                    >
+                      {isGlobalAdLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : isKeyCooldown ? (
+                        `${keyCooldownTime}s`
+                      ) : keyAdStatus.canWatch ? (
+                        "مشاهدة"
+                      ) : (
+                        "انتهى اليوم"
+                      )}
+                    </button>
+                  </div>
+
                   {/* Keys Exchange Package */}
                   <div className="flex items-center justify-between p-2 md:p-4 border-2 border-yellow-200 rounded-2xl bg-yellow-50 mb-4 transition-colors box-game relative">
                     <div className="flex items-center gap-1.5">
@@ -11454,17 +14068,17 @@ export default function App() {
                           10 تخمينات
                         </div>
                         <div className="text-xs font-bold text-yellow-600 flex items-center gap-1">
-                          مقابل 25 مفتاح <Key className="w-3 h-3" />
+                          مقابل 100 مفتاح <Key className="w-3 h-3" />
                         </div>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       <button
                         onClick={handleBuyTokensWithKeys}
-                        disabled={(keys || 0) < 25}
-                        className={`px-3 py-2 rounded-xl font-black text-sm transition-all shadow-md flex items-center gap-1 ${(keys || 0) < 25 ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-yellow-400 hover:bg-yellow-500 text-black animate-pulse active:scale-95"}`}
+                        disabled={(keys || 0) < 100}
+                        className={`px-3 py-2 rounded-xl font-black text-sm transition-all shadow-md flex items-center gap-1 ${(keys || 0) < 100 ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-yellow-400 hover:bg-yellow-500 text-black animate-pulse active:scale-95"}`}
                       >
-                        {(keys || 0) < 25 && <Lock className="w-4 h-4" />}
+                        {(keys || 0) < 100 && <Lock className="w-4 h-4" />}
                         تبديل
                       </button>
                     </div>
@@ -11477,12 +14091,19 @@ export default function App() {
                         👑
                       </div>
                       <div>
-                        <div className="font-bold text-[14px] md:text-lg text-brown-dark">
-                          باقة المحترفين 3 أيام
+                        <div className="font-bold text-[13px] md:text-lg text-brown-dark">
+                          باقة المحترفين 1 يوم
                         </div>
-                        <div className="text-xs font-bold text-yellow-600 flex items-center gap-1">
+                        <div className="text-xs font-bold text-yellow-600 flex items-center gap-1 mt-0.5">
                           مقابل 100 مفتاح{" "}
                           <Key className="w-3 h-3 text-yellow-500" />
+                        </div>
+                        <div className="text-[10px] md:text-xs font-bold text-gray-600 flex items-center gap-1 mt-0.5">
+                          استمتع باللعبة بدون اعلانات
+                          <div className="relative inline-flex items-center justify-center">
+                            <span className="w-3 h-3 md:w-3 md:h-3 flex items-center text-center justify-center">📺</span>
+                            <Ban className="w-4 h-4 md:w-5 md:h-5 text-red-500 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -11643,11 +14264,25 @@ export default function App() {
               </div>
 
               <div className="space-y-2 text-brown-muted font-bold max-h-[60vh] overflow-y-auto p-2 pr-2 custom-scrollbar">
-                <p className="flex text-center items-center justify-center">
+                <p className="flex text-sm text-center items-center justify-center">
                   كلما فزت في مباريات أكثر، كلما حصلت على XP وارتفع مستواك!
                 </p>
+
+                {/* Leaderboard rankings */}
+                <div className="box-game p-2">
+                  <h3 className="text-lg font-black text-red-600 mb-2 flex items-center gap-2">
+                    <div className="text-xl relative top-0.5">📊</div>
+                    ترتيب أبطال التخمين
+                  </h3>
+                  <p className="text-sm leading-relaxed">
+                    الترتيب يعتمد فقط علي اللعب داخل مباريات البحث العشوائي 
+                    يتحدث الترتيب كل 24 ساعة, وجائزة قيمة أسبوعية اذا استمر اللاعب
+                    في الحفاظ علي الترتيب الاول كل أسبوع.
+                  </p>
+                </div>
+
                 {/* Takhmina Coins */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-lg font-black text-yellow-600 mb-2 flex items-center gap-2">
                     <img
                       src="/Takhmina_coin_02.png"
@@ -11664,7 +14299,7 @@ export default function App() {
                 </div>
 
                 {/* Keys */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-lg font-black text-yellow-500 mb-2 flex items-center gap-2">
                     <Key className="w-5 h-5" />
                     مفاتيح التخمين
@@ -11677,18 +14312,26 @@ export default function App() {
                 </div>
 
                 {/* Pro Package */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-lg font-black text-accent-orange mb-2 flex items-center gap-2">
                     <div className="text-xl relative top-0.5">👑</div>
                     باقة المحترفين
                   </h3>
                   <p className="text-sm leading-relaxed">
                     عند حصولك علي باقة المحترفين يمكنك استخدام جميع وسائل
-                    المساعدة بدون إعلانات حسب مدة تفعيل الباقة.
+                    المساعدة في لعبة فئات التخمين بدون إعلانات حسب مدة تفعيل الباقة.
+                    <div className="text-[10px] md:text-xs font-bold text-gray-600 flex items-center gap-1 mt-0.5">
+                      وايضا يمكنك الاستمتاع باللعبة
+                      بدون الفواصل الاعلانية
+                      <div className="relative inline-flex items-center justify-center">
+                        <span className="w-3 h-3 md:w-3 md:h-3 flex items-center text-center justify-center">📺</span>
+                        <Ban className="w-4 h-4 md:w-5 md:h-5 text-red-500 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
+                      </div>
+                    </div>
                   </p>
                 </div>
 
-                <div className="box-game p-3 space-y-4">
+                <div className="box-game p-2 space-y-4">
                   <h3 className="text-sm md:text-lg font-black text-accent-orange mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Zap className="w-5 h-5" />
@@ -11727,7 +14370,7 @@ export default function App() {
                 </div>
 
                 {/* Hint */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-sm md:text-lg font-black text-accent-blue mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2 relative">
                       <HelpCircle className="w-5 h-5" />
@@ -11747,7 +14390,7 @@ export default function App() {
                 </div>
 
                 {/* Letter Revealer */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-sm md:text-lg font-black text-accent-green mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2 relative">
                       <Type className="w-5 h-5" />
@@ -11767,7 +14410,7 @@ export default function App() {
                 </div>
 
                 {/* Time Freeze */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-sm md:text-lg font-black text-cyan-600 mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2 relative">
                       <Snowflake className="w-5 h-5" />
@@ -11787,7 +14430,7 @@ export default function App() {
                 </div>
 
                 {/* Word Count */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-sm md:text-lg font-black text-indigo-600 mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2 relative">
                       <Hash className="w-5 h-5" />
@@ -11807,7 +14450,7 @@ export default function App() {
                 </div>
 
                 {/* Spy */}
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-sm md:text-lg font-black text-accent-purple mb-2 flex items-center justify-between">
                     <div className="flex items-center gap-2 relative">
                       <Eye className="w-5 h-5" />
@@ -11826,7 +14469,7 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="box-game p-3">
+                <div className="box-game p-2">
                   <h3 className="text-lg font-black text-indigo-600 mb-2 flex items-center gap-2">
                     <Trophy className="w-5 h-5" />
                     جوائز المستويات
@@ -12206,27 +14849,32 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    {isIdVisible && localStorage.getItem("khamin_secret_token") && (
-                      <div className="flex items-center border border-gray-200 rounded-lg p-1 px-2 gap-2 mt-1 bg-white">
-                        <span className="text-[10px] text-gray-500 block w-20">كلمة المرور (Secret Token)</span>
-                        <span className="text-[10px] font-mono text-brown-dark rounded bg-gray-100 px-1 py-0.5">
+                    {isIdVisible &&
+                      localStorage.getItem("khamin_secret_token") && (
+                        <div className="flex w-full items-center justify-between border border-gray-200 rounded-lg p-1 px-2 gap-1 mt-1 bg-white">
+                          <span className="text-[10px] text-gray-500 font-bold block w-full">
+                            كلمة المرور (Secret Token)
+                          </span>
+                          <span className="text-[10px] font-mono text-brown-dark rounded bg-gray-100 px-1 py-0.5">
                             {localStorage.getItem("khamin_secret_token")}
-                        </span>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const token = localStorage.getItem("khamin_secret_token");
-                            if (token) {
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const token = localStorage.getItem(
+                                "khamin_secret_token",
+                              );
+                              if (token) {
                                 navigator.clipboard.writeText(token);
-                            }
-                          }}
-                          className="p-1 hover:bg-purple-100 rounded text-purple-600 transition-colors cursor-pointer"
-                          title="نسخ كلمة المرور"
-                        >
-                          <Copy className="w-3 h-3" />
-                        </button>
-                      </div>
-                    )}
+                              }
+                            }}
+                            className="p-1 hover:bg-purple-100 rounded text-purple-600 transition-colors cursor-pointer"
+                            title="نسخ كلمة المرور"
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
                     <span className="text-[10px] md:text-[12px] p-1 bg-red-100 font-bold text-red-600 rounded">
                       لا تشارك الـ ID أو كلمة المرور مع اي شخص!⚠️
                     </span>
@@ -12301,13 +14949,13 @@ export default function App() {
                         type="text"
                         value={playerName}
                         onChange={(e) => {
-                          const name = e.target.value;
+                          setPlayerName(e.target.value);
+                        }}
+                        onBlur={() => {
                           const emojiRegex =
                             /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu;
-                          const cleanName = name.replace(emojiRegex, "");
-                          setPlayerName(
-                            filterProfanity(cleanName.slice(0, 15)),
-                          );
+                          const cleanName = playerName.replace(emojiRegex, "");
+                          setPlayerName(filterProfanity(cleanName.slice(0, 15)));
                         }}
                         className={`input-game ${!lastRenameAt || (Date.now() - lastRenameAt) / (1000 * 60 * 60 * 24) >= 30 ? "" : "opacity-60 cursor-not-allowed pl-10"}`}
                         maxLength={15}
@@ -12661,6 +15309,25 @@ export default function App() {
                       >
                         <div
                           className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border-2 border-black transition-all ${hideFriendRequests ? "right-0.5" : "left-0.5"}`}
+                        ></div>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between flex-row-reverse">
+                      <div className="flex items-center gap-2 flex-row-reverse">
+                        <div className="w-8 h-8 bg-purple-500 rounded-xl flex items-center justify-center text-white shadow-sm border-2 border-black">
+                          <Lock className="w-4 h-4" />
+                        </div>
+                        <span className="text-sm font-black text-brown-muted">
+                          منع شات الدردشة (لعبة فئات التخمين)
+                        </span>
+                      </div>
+                      <button
+                        onClick={toggleDisableGuessChat}
+                        className={`w-12 h-6 rounded-full border-2 border-black transition-all relative ${disableGuessChat ? "bg-accent-green" : "bg-gray-300"}`}
+                      >
+                        <div
+                          className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border-2 border-black transition-all ${disableGuessChat ? "right-0.5" : "left-0.5"}`}
                         ></div>
                       </button>
                     </div>
@@ -13148,9 +15815,9 @@ export default function App() {
                     لا يوجد لاعبين محظورين
                   </p>
                 ) : (
-                  blockedPlayers.map((bp) => (
+                  blockedPlayers.map((bp, idx) => (
                     <div
-                      key={bp.serial}
+                      key={bp.serial || `bp-${idx}`}
                       className="flex items-center justify-between bg-white p-3 rounded-xl border-2 border-gray-200 flex-row-reverse"
                     >
                       <span className="font-black text-main">{bp.name}</span>
@@ -13308,7 +15975,9 @@ export default function App() {
                           <UserPlus size={18} />
                         </div>
                         <span className="font-black text-main">
-                          {googleRegistrationData ? 'إنشاء حساب آمن بـ Google' : 'إنشاء حساب مؤقت'}
+                          {googleRegistrationData
+                            ? "إنشاء حساب آمن بـ Google"
+                            : "إنشاء حساب مؤقت"}
                         </span>
                       </div>
                       <motion.div
@@ -13341,13 +16010,13 @@ export default function App() {
                             type="text"
                             value={playerName}
                             onChange={(e) => {
-                              const name = e.target.value;
+                              setPlayerName(e.target.value);
+                            }}
+                            onBlur={() => {
                               const emojiRegex =
                                 /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu;
-                              const cleanName = name.replace(emojiRegex, "");
-                              setPlayerName(
-                                filterProfanity(cleanName.slice(0, 15)),
-                              );
+                              const cleanName = playerName.replace(emojiRegex, "");
+                              setPlayerName(filterProfanity(cleanName.slice(0, 15)));
                             }}
                             placeholder="ادخل اسمك..."
                             className="input-game"
@@ -13557,15 +16226,23 @@ export default function App() {
                   {!googleRegistrationData && (
                     <button
                       onClick={() => {
-                        fetch("/api/auth/google/url")
+                        fetch(apiUrl("/api/auth/google/url"))
                           .then((res) => res.json())
                           .then((data) => {
-                            window.open(data.url, 'oauth_popup', 'width=600,height=700');
+                            window.open(
+                              data.url,
+                              "oauth_popup",
+                              "width=600,height=700",
+                            );
                           });
                       }}
                       className="w-full btn-game bg-white border-2 border-gray-200 text-gray-800 hover:bg-gray-50 py-4 text-lg font-black shadow-md flex items-center justify-center gap-3 mt-4"
                     >
-                      <img src="https://www.google.com/favicon.ico" alt="Google" className="w-6 h-6" />
+                      <img
+                        src="https://www.google.com/favicon.ico"
+                        alt="Google"
+                        className="w-6 h-6"
+                      />
                       إنشاء حساب آمن بـ Google
                     </button>
                   )}
@@ -13588,15 +16265,23 @@ export default function App() {
                     {!googleRegistrationData && (
                       <button
                         onClick={() => {
-                          fetch("/api/auth/google/url")
+                          fetch(apiUrl("/api/auth/google/url"))
                             .then((res) => res.json())
                             .then((data) => {
-                              window.open(data.url, 'oauth_popup', 'width=600,height=700');
+                              window.open(
+                                data.url,
+                                "oauth_popup",
+                                "width=600,height=700",
+                              );
                             });
                         }}
                         className="w-full btn-game bg-white border-2 border-gray-200 text-gray-800 hover:bg-gray-50 py-3 text-lg font-black shadow-md flex items-center justify-center gap-3 mb-6"
                       >
-                        <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
+                        <img
+                          src="https://www.google.com/favicon.ico"
+                          alt="Google"
+                          className="w-5 h-5"
+                        />
                         تسجيل دخول بحساب Google
                       </button>
                     )}
@@ -13724,6 +16409,50 @@ export default function App() {
                   className="w-full btn-game btn-secondary py-3 text-lg mt-2"
                 >
                   حسناً، فهمت
+                </button>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showWCGiftModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+            >
+              <motion.div
+                initial={{ scale: 0.9, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.9, y: 20 }}
+                className="bg-white rounded-3xl p-6 md:p-8 max-w-sm w-full mx-auto shadow-2xl relative border-4 border-blue-400 overflow-hidden text-center"
+              >
+                <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-green-400 via-blue-500 to-green-400"></div>
+                
+                <h2 className="text-2xl md:text-3xl font-black text-blue-800 mb-4 tracking-tight">هدية كأس العالم! 🏆</h2>
+                
+                <div className="w-40 h-40 mx-auto mb-6 bg-gradient-to-br from-green-50 to-blue-50 rounded-2xl flex items-center justify-center p-4 relative shadow-inner border-2 border-blue-100">
+                  <img src="/assets/football-category-frame-gift.png" alt="World Cup Frame" className="w-full h-full object-contain drop-shadow-md" />
+                </div>
+                
+                <p className="text-brown-dark font-bold mb-6 text-sm md:text-base leading-relaxed">
+                  بمناسبة انطلاق بطولة كأس العالم، نهديكم هذا الإطار المميز مجاناً لجميع الأبطال طوال فترة البطولة!
+                </p>
+
+                <button
+                  onClick={handleClaimWCGift}
+                  className="w-full bg-gradient-to-r from-blue-500 to-green-500 hover:from-blue-600 hover:to-green-600 active:scale-95 text-white font-black py-4 rounded-xl text-lg shadow-lg transition-all outline-none"
+                >
+                  استلم الهدية! ⚽
+                </button>
+                <button
+                  onClick={handleDeclineWCGift}
+                  className="w-full btn-game mt-3 bg-gray-300 hover:bg-gray-200 text-لامشؤن font-bold py-3 rounded-xl transition-all"
+                >
+                  لا، شكراً
                 </button>
               </motion.div>
             </motion.div>
@@ -13881,11 +16610,25 @@ export default function App() {
               className="fixed inset-0 z-[6000]"
             >
               <AdminLogin
+                onAdminVerified={(email) => {
+                  if (email.toLowerCase() === "adhamsabry.co@gmail.com") {
+                    setIsAdmin(true);
+                    setAdminEmail(email);
+                    localStorage.setItem("khamin_is_admin", "true");
+                    localStorage.setItem("khamin_admin_email", email);
+                    setShowAdminDashboard(true);
+                    setShowAdminLogin(false);
+                  }
+                }}
                 onLogin={() => {
-                  fetch("/api/auth/google/url")
+                  fetch(apiUrl("/api/auth/google/url"))
                     .then((res) => res.json())
                     .then((data) => {
-                      window.location.href = data.url;
+                      window.open(
+                        data.url,
+                        "oauth_popup",
+                        "width=600,height=700",
+                      );
                     });
                 }}
               />
@@ -13956,12 +16699,6 @@ export default function App() {
                           المتجر والتخمينات
                         </button>
                         <button
-                          onClick={() => setAdminTab("colors")}
-                          className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${adminTab === "colors" ? "bg-accent-blue text-white" : "bg-accent-blue-soft text-accent-blue hover:bg-accent-blue-soft"}`}
-                        >
-                          ألوان اللعبة
-                        </button>
-                        <button
                           onClick={() => setAdminTab("announcements")}
                           className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${adminTab === "announcements" ? "bg-red-500 text-white" : "bg-red-100 text-red-500 hover:bg-red-200"}`}
                         >
@@ -14000,20 +16737,6 @@ export default function App() {
                               {adminContacts.length}
                             </span>
                           )}
-                        </button>
-                        <button
-                          onClick={() => {
-                            setAdminTab("live_matches");
-                            socket?.emit(
-                              "admin_get_active_rooms",
-                              (rooms: any) => {
-                                if (Array.isArray(rooms)) setActiveRooms(rooms);
-                              },
-                            );
-                          }}
-                          className={`text-xs font-bold px-3 py-1 rounded-full transition-all ${adminTab === "live_matches" ? "bg-red-600 text-white" : "bg-red-100 text-red-600 hover:bg-red-200"}`}
-                        >
-                          المباريات المباشرة
                         </button>
                         <button
                           onClick={() => setAdminTab("quick_chat")}
@@ -14537,1194 +17260,6 @@ export default function App() {
                           </div>
                         </div>
                       )}
-                    </div>
-                  ) : adminTab === "colors" ? (
-                    <div className="flex-1 p-6 overflow-y-auto bg-gray-50">
-                      <div className="max-w-4xl mx-auto space-y-6">
-                        <div className="box-game p-6 shadow-sm">
-                          <h3 className="text-xl font-black text-brown-dark mb-4 flex items-center gap-2">
-                            <div className="w-8 h-8 rounded-full bg-accent-blue-soft flex items-center justify-center">
-                              <span className="text-lg">🎨</span>
-                            </div>
-                            تخصيص ألوان اللعبة
-                          </h3>
-                          <p className="text-brown-muted mb-6 font-bold">
-                            يمكنك تغيير ألوان اللعبة بالكامل من هنا. التغييرات
-                            ستظهر فوراً لديك، ولكن يجب حفظها لتظهر للجميع.
-                          </p>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {/* Background Colors */}
-                            <div className="space-y-4">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                الخلفيات
-                              </h4>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون الخلفية (بداية التدرج)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.bgBodyStart}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.bgBodyStart}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        bgBodyStart: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون الخلفية (نهاية التدرج)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.bgBodyEnd}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.bgBodyEnd}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        bgBodyEnd: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون الصناديق (Box)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.bgBox}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.bgBox}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        bgBox: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون البطاقات (Card)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.bgCard}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.bgCard}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        bgCard: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون النوافذ المنبثقة (Modals)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.modalBg}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.modalBg}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        modalBg: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Progress Bars */}
-                            <div className="space-y-4">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                أشرطة التقدم (Progress Bars)
-                              </h4>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  خلفية شريط المستوى
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.levelBarBg}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      levelBarBg: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  تعبئة شريط المستوى
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.levelBarFill}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      levelBarFill: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  خلفية شريط الـ XP
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.xpBarBg}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      xpBarBg: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  تعبئة شريط الـ XP
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.xpBarFill}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      xpBarFill: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  نص الـ XP (قبل المليء)
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.xpBarText}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      xpBarText: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  نص الـ XP (بعد المليء)
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.xpBarTextActive}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      xpBarTextActive: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                            </div>
-
-                            {/* Report Bar */}
-                            <div className="space-y-4">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                شريط البلاغات
-                              </h4>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  خلفية شريط البلاغات
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.reportBarBg}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      reportBarBg: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون البلاغات (منخفض)
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.reportBarLow}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      reportBarLow: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون البلاغات (متوسط)
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.reportBarMedium}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      reportBarMedium: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون البلاغات (مرتفع)
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.reportBarHigh}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      reportBarHigh: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                            </div>
-
-                            {/* Text & Borders */}
-                            <div className="space-y-4">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                النصوص والحدود
-                              </h4>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون النص الرئيسي
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.textMain}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.textMain}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        textMain: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون النص الفاتح
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.textLight}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.textLight}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        textLight: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون الحدود (Borders)
-                                </label>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                    {themeConfig.borderGame}
-                                  </span>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.borderGame}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        borderGame: e.target.value,
-                                      })
-                                    }
-                                    className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Buttons */}
-                            <div className="space-y-4 md:col-span-2">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                الأزرار
-                              </h4>
-
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                {/* Primary Button */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    الزر الأساسي (Primary)
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnPrimaryBgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnPrimaryBgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnPrimaryBgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnPrimaryBgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnPrimaryBorder}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnPrimaryBorder: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      عند التحويم (Hover)
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnPrimaryHover}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnPrimaryHover: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <button className="btn-game btn-primary w-full py-2 mt-2">
-                                    تجربة الزر
-                                  </button>
-                                </div>
-
-                                {/* Secondary Button */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    الزر الثانوي (Secondary)
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSecondaryBgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSecondaryBgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSecondaryBgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSecondaryBgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSecondaryBorder}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSecondaryBorder: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      عند التحويم (Hover)
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSecondaryHover}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSecondaryHover: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <button className="btn-game btn-secondary w-full py-2 mt-2">
-                                    تجربة الزر
-                                  </button>
-                                </div>
-
-                                {/* Success Button */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    زر النجاح (Success) - الأخضر
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSuccessBgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSuccessBgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSuccessBgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSuccessBgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSuccessBorder}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSuccessBorder: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      عند التحويم (Hover)
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnSuccessHover}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnSuccessHover: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <button className="btn-game btn-success w-full py-2 mt-2">
-                                    تجربة الزر
-                                  </button>
-                                </div>
-
-                                {/* Danger Button */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    زر الخطر (Danger)
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnDangerBgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnDangerBgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnDangerBgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnDangerBgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnDangerBorder}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnDangerBorder: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      عند التحويم (Hover)
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.btnDangerHover}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          btnDangerHover: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <button className="btn-game btn-danger w-full py-2 mt-2">
-                                    تجربة الزر
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Accent Colors */}
-                            <div className="space-y-4 md:col-span-2">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                ألوان النصوص المميزة (Accents)
-                              </h4>
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-accent-orange">
-                                    البرتقالي
-                                  </label>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.accentOrange}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        accentOrange: e.target.value,
-                                      })
-                                    }
-                                    className="w-full h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-accent-purple">
-                                    البنفسجي
-                                  </label>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.accentPurple}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        accentPurple: e.target.value,
-                                      })
-                                    }
-                                    className="w-full h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-accent-blue">
-                                    الأزرق
-                                  </label>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.accentBlue}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        accentBlue: e.target.value,
-                                      })
-                                    }
-                                    className="w-full h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-accent-green">
-                                    الأخضر
-                                  </label>
-                                  <input
-                                    type="color"
-                                    value={themeConfig.accentGreen}
-                                    onChange={(e) =>
-                                      setThemeConfig({
-                                        ...themeConfig,
-                                        accentGreen: e.target.value,
-                                      })
-                                    }
-                                    className="w-full h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                            {/* Text Shades */}
-                            <div className="space-y-4 md:col-span-2">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                درجات النصوص (Text Shades)
-                              </h4>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-brown-muted">
-                                    نص باهت (Muted)
-                                  </label>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                      {themeConfig.textMuted}
-                                    </span>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.textMuted}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          textMuted: e.target.value,
-                                        })
-                                      }
-                                      className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                    />
-                                  </div>
-                                  <p
-                                    className="text-xs font-bold"
-                                    style={{ color: themeConfig.textMuted }}
-                                  >
-                                    نص تجريبي باهت
-                                  </p>
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-brown-muted">
-                                    نص فاتح (Light Accent)
-                                  </label>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                      {themeConfig.textLightAccent}
-                                    </span>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.textLightAccent}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          textLightAccent: e.target.value,
-                                        })
-                                      }
-                                      className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                    />
-                                  </div>
-                                  <p
-                                    className="text-xs font-bold"
-                                    style={{
-                                      color: themeConfig.textLightAccent,
-                                    }}
-                                  >
-                                    نص تجريبي فاتح
-                                  </p>
-                                </div>
-                                <div className="space-y-2">
-                                  <label className="text-sm font-bold text-brown-muted">
-                                    نص ناعم (Soft)
-                                  </label>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                                      {themeConfig.textSoft}
-                                    </span>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.textSoft}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          textSoft: e.target.value,
-                                        })
-                                      }
-                                      className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                    />
-                                  </div>
-                                  <p
-                                    className="text-xs font-bold"
-                                    style={{ color: themeConfig.textSoft }}
-                                  >
-                                    نص تجريبي ناعم
-                                  </p>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Ranks (Bar Charts) */}
-                            <div className="space-y-4 md:col-span-2">
-                              <h4 className="font-black text-brown-dark border-b pb-2">
-                                ألوان المراكز (Leaderboard Bars)
-                              </h4>
-                              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                {/* Rank 1 */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    المركز الأول 🥇
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank1BgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank1BgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank1BgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank1BgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank1Border}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank1Border: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div
-                                    className="w-full h-16 rounded-t-xl border-t-4"
-                                    style={{
-                                      background: `linear-gradient(to bottom, ${themeConfig.rank1BgStart}, ${themeConfig.rank1BgEnd})`,
-                                      borderColor: themeConfig.rank1Border,
-                                    }}
-                                  ></div>
-                                </div>
-
-                                {/* Rank 2 */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    المركز الثاني 🥈
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank2BgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank2BgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank2BgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank2BgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank2Border}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank2Border: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div
-                                    className="w-full h-12 rounded-t-xl border-t-4"
-                                    style={{
-                                      background: `linear-gradient(to bottom, ${themeConfig.rank2BgStart}, ${themeConfig.rank2BgEnd})`,
-                                      borderColor: themeConfig.rank2Border,
-                                    }}
-                                  ></div>
-                                </div>
-
-                                {/* Rank 3 */}
-                                <div className="space-y-2">
-                                  <h5 className="text-xs font-black text-brown-light">
-                                    المركز الثالث 🥉
-                                  </h5>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      بداية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank3BgStart}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank3BgStart: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      نهاية التدرج
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank3BgEnd}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank3BgEnd: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div className="flex items-center justify-between">
-                                    <label className="text-sm font-bold text-brown-muted">
-                                      الحدود
-                                    </label>
-                                    <input
-                                      type="color"
-                                      value={themeConfig.rank3Border}
-                                      onChange={(e) =>
-                                        setThemeConfig({
-                                          ...themeConfig,
-                                          rank3Border: e.target.value,
-                                        })
-                                      }
-                                      className="w-8 h-8 rounded cursor-pointer"
-                                    />
-                                  </div>
-                                  <div
-                                    className="w-full h-8 rounded-t-xl border-t-4"
-                                    style={{
-                                      background: `linear-gradient(to bottom, ${themeConfig.rank3BgStart}, ${themeConfig.rank3BgEnd})`,
-                                      borderColor: themeConfig.rank3Border,
-                                    }}
-                                  ></div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-8 pt-6 border-t border-game">
-                            <h3 className="text-lg font-bold mb-4">
-                              ألوان المتجر والتخمينات
-                            </h3>
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  بداية تدرج المتجر
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopHeaderStart}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopHeaderStart: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  نهاية تدرج المتجر
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopHeaderEnd}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopHeaderEnd: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون نص التخمينة
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopTokenText}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopTokenText: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون عنوان المعلومات
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopInfoTitle}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopInfoTitle: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  لون عنوان التحذير
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopWarningTitle}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopWarningTitle: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                              <div className="flex items-center justify-between">
-                                <label className="text-sm font-bold text-brown-muted">
-                                  خلفية النوافذ
-                                </label>
-                                <input
-                                  type="color"
-                                  value={themeConfig.shopModalBg}
-                                  onChange={(e) =>
-                                    setThemeConfig({
-                                      ...themeConfig,
-                                      shopModalBg: e.target.value,
-                                    })
-                                  }
-                                  className="w-10 h-10 rounded-lg cursor-pointer border-2 border-gray-200"
-                                />
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-8 pt-6 border-t border-game flex justify-end gap-4">
-                            <button
-                              onClick={() => {
-                                setThemeConfig(DEFAULT_THEME);
-                                socket?.emit("admin_save_theme", DEFAULT_THEME);
-                                showAlert(
-                                  "تم إعادة تعيين الألوان وحفظها بنجاح!",
-                                  "نجاح",
-                                );
-                              }}
-                              className="px-6 py-3 rounded-xl font-black text-brown-muted hover:bg-gray-100 transition-colors"
-                            >
-                              إعادة تعيين للافتراضي
-                            </button>
-                            <button
-                              onClick={() => {
-                                socket?.emit("admin_save_theme", themeConfig);
-                                showAlert(
-                                  "تم حفظ الألوان بنجاح! (على السيرفر)",
-                                  "نجاح",
-                                );
-                              }}
-                              className="px-8 py-3 bg-accent-blue hover:brightness-110 text-white rounded-xl font-black shadow-lg transition-all transform hover:-translate-y-1"
-                            >
-                              حفظ التغييرات
-                            </button>
-                          </div>
-                        </div>
-                      </div>
                     </div>
                   ) : adminTab === "rewards" ? (
                     <div className="flex-1 p-6 overflow-y-auto bg-gray-50">
@@ -16374,9 +17909,9 @@ export default function App() {
                             </div>
                           ) : (
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                              {pendingAvatars.map((player) => (
+                              {pendingAvatars.map((player, idx) => (
                                 <div
-                                  key={player.serial}
+                                  key={player.serial || player.name || `pending-${idx}`}
                                   className="bg-white p-3 rounded-xl border-2 border-gray-100 shadow-sm flex flex-col gap-3"
                                 >
                                   <div className="flex items-center gap-2">
@@ -17035,128 +18570,6 @@ export default function App() {
                       luckyWheelEnabled={luckyWheelEnabled}
                       setLuckyWheelEnabled={setLuckyWheelEnabled}
                     />
-                  ) : adminTab === "live_matches" ? (
-                    <div className="flex-1 flex flex-col overflow-hidden bg-gray-50/50 p-6">
-                      <div className="flex items-center justify-between mb-6">
-                        <h3 className="text-xl font-black text-brown-dark flex items-center gap-2">
-                          <Activity className="w-6 h-6 text-red-500" />
-                          المباريات المباشرة الجارية الآن
-                        </h3>
-                        <button
-                          onClick={() => {
-                            socket?.emit(
-                              "admin_get_active_rooms",
-                              (rooms: any) => {
-                                if (Array.isArray(rooms)) setActiveRooms(rooms);
-                              },
-                            );
-                          }}
-                          className="px-4 py-2 bg-white border-2 border-gray-100 rounded-xl font-bold text-sm hover:bg-gray-50 transition-all flex items-center gap-2"
-                        >
-                          <RefreshCw className="w-4 h-4" />
-                          تحديث القائمة
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 overflow-y-auto pr-2">
-                        {activeRooms.length === 0 ? (
-                          <div className="col-span-full flex flex-col items-center justify-center py-20 text-brown-light">
-                            <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-4">
-                              <Activity className="w-10 h-10 opacity-20" />
-                            </div>
-                            <p className="font-black text-lg">
-                              لا توجد مباريات نشطة حالياً
-                            </p>
-                            <p className="text-sm font-bold opacity-60">
-                              سيظهر هنا أي تحدي يبدأ بين لاعبين
-                            </p>
-                          </div>
-                        ) : (
-                          activeRooms.map((room) => (
-                            <motion.div
-                              key={room.id}
-                              initial={{ opacity: 0, y: 20 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              className="bg-white rounded-3xl p-6 shadow-sm border-2 border-gray-100 hover:border-red-200 transition-all group"
-                            >
-                              <div className="flex items-center justify-between mb-4">
-                                <div className="px-3 py-1 bg-red-100 text-red-600 rounded-full text-[10px] font-black flex items-center gap-1">
-                                  <div className="w-1.5 h-1.5 bg-red-600 rounded-full animate-pulse" />
-                                  مباشر
-                                </div>
-                                <span className="text-[10px] font-bold text-gray-400">
-                                  ID: {room.id}
-                                </span>
-                              </div>
-
-                              <div className="flex items-center justify-center gap-4 mb-6">
-                                <div className="flex flex-col items-center gap-2 flex-1">
-                                  <div className="w-12 h-12">
-                                    {renderAvatarContent(
-                                      room.players[0]?.avatar,
-                                      getLevel(room.players[0]?.xp || 0),
-                                      false,
-                                      true,
-                                      room.players[0]?.selectedFrame,
-                                      room.players[0]?.serial,
-                                    )}
-                                  </div>
-                                  <span className="text-xs font-black text-brown-dark truncate w-full text-center">
-                                    {room.players[0]?.name}
-                                  </span>
-                                </div>
-
-                                <div className="text-xl font-black text-gray-300 italic">
-                                  VS
-                                </div>
-
-                                <div className="flex flex-col items-center gap-2 flex-1">
-                                  <div className="w-12 h-12">
-                                    {renderAvatarContent(
-                                      room.players[1]?.avatar,
-                                      getLevel(room.players[1]?.xp || 0),
-                                      false,
-                                      true,
-                                      room.players[1]?.selectedFrame,
-                                      room.players[1]?.serial,
-                                    )}
-                                  </div>
-                                  <span className="text-xs font-black text-brown-dark truncate w-full text-center">
-                                    {room.players[1]?.name || "..."}
-                                  </span>
-                                </div>
-                              </div>
-
-                              <button
-                                onClick={() => {
-                                  // Set spectating ID first to avoid race condition with room_update
-                                  updateSpectatingRoomId(room.id);
-                                  socket?.emit(
-                                    "admin_join_spectator",
-                                    room.id,
-                                    (res: any) => {
-                                      if (res.success) {
-                                        setShowAdminDashboard(false);
-                                      } else {
-                                        updateSpectatingRoomId(null);
-                                        showAlert(
-                                          res.error || "فشل الانضمام للمشاهدة",
-                                          "خطأ",
-                                        );
-                                      }
-                                    },
-                                  );
-                                }}
-                                className="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-2xl font-black text-sm shadow-[0_4px_0_0_#b91c1c] active:shadow-none active:translate-y-1 transition-all flex items-center justify-center gap-2"
-                              >
-                                <Eye className="w-4 h-4" />
-                                دخول لمشاهدة المباراة
-                              </button>
-                            </motion.div>
-                          ))
-                        )}
-                      </div>
-                    </div>
                   ) : adminTab === "quick_chat" ? (
                     <QuickChatManager
                       config={customConfig}
@@ -18352,15 +19765,16 @@ export default function App() {
                                                 .slice(0, visibleCount)
                                                 .map((img) => (
                                                   <div
-                                                    key={img.id}
+                                                    key={img.id || `admin-img-${Math.random()}`}
                                                     className="box-game overflow-hidden flex flex-col"
                                                   >
                                                     <img
                                                       src={
-                                                        img.data ||
-                                                        `/icon-3.png`
+                                                        apiUrl(`/api/image/${encodeURIComponent(img.category)}/${encodeURIComponent(img.name)}`)
                                                       }
                                                       alt={img.name}
+                                                      loading="lazy"
+                                                      decoding="async"
                                                       className="w-full aspect-square object-cover"
                                                     />
                                                     <div className="p-3 flex items-center justify-between gap-2 bg-white border-t border-game">
@@ -18674,7 +20088,7 @@ export default function App() {
               `تم إرسال الهدايا إلى ${showGiftModal.name} بنجاح!`,
               "نجاح",
             );
-            playSound("correct");
+            playSound("correctAnswer");
             setShowGiftModal(null);
             setGiftAmounts({ keys: "", tokens: "", helpers: {} });
           } else {
@@ -18962,7 +20376,7 @@ export default function App() {
                 <div className="space-y-2">
                   {friendsList
                     .filter((f) => !askedFriendsForImage.includes(f.serial))
-                    .map((friend) => {
+                    .map((friend, idx) => {
                       const isSelected = selectedFriendsForRequest.includes(
                         friend.serial,
                       );
@@ -18971,7 +20385,7 @@ export default function App() {
                       const isDisabled = isMaxSelected && !isSelected;
                       return (
                         <div
-                          key={friend.serial}
+                          key={friend.serial || `req-friend-${idx}`}
                           onClick={() => {
                             if (isDisabled) return;
                             if (isSelected) {
@@ -19159,34 +20573,16 @@ export default function App() {
                             >
                               {isRevealed ? (
                                 <div className="relative w-full h-full">
-                                  {(() => {
-                                    const found = adminImages.find((img) => {
-                                      const catMatch =
-                                        img.category === category.id;
-                                      const nameMatch =
-                                        normalizeEgyptian(
-                                          img.name,
-                                        ).toLowerCase() ===
-                                        normalizeEgyptian(
-                                          imgName,
-                                        ).toLowerCase();
-                                      return catMatch && nameMatch;
-                                    });
-                                    return (
-                                      <img
-                                        src={
-                                          found?.data
-                                            ? found.data.startsWith("data:")
-                                              ? found.data
-                                              : `data:image/png;base64,${found.data}`
-                                            : `/icon-3.png`
-                                        }
-                                        alt={imgName}
-                                        className="w-full h-full object-cover"
-                                        referrerPolicy="no-referrer"
-                                      />
-                                    );
-                                  })()}
+                                  <img
+                                    src={apiUrl(
+                                      `/api/image/${encodeURIComponent(category.id)}/${encodeURIComponent(imgName)}`,
+                                    )}
+                                    alt={imgName}
+                                    loading="lazy"
+                                    decoding="async"
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
                                   <span className="absolute bottom-1 left-1 text-[8px] font-black text-white bg-black/50 px-1 rounded">
                                     {imgName}
                                   </span>
@@ -19289,6 +20685,1006 @@ export default function App() {
     );
   };
 
+  
+
+  const renderSpeedCupsRewardBar = () => {
+    if (!room || room.matchType !== "random" || room.gameState !== "speed_cups_finished") return null;
+
+    const targetPoints = speedCupsRewardLevel * 100;
+    const progress = Math.min((speedCupsMatchPoints / targetPoints) * 100, 100);
+    const isReady = speedCupsMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-pink-50 to-rose-50 border-2 border-pink-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-pink-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+           <div className="flex items-center gap-2 font-bold text-pink-800 text-sm">
+             <span>المستوي {speedCupsRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-pink-200" dir="ltr">
+               {speedCupsMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  socket?.emit("claim_speed_cups_reward", { serial: playerSerial });
+                  setCustomConfirm({
+                    show: true,
+                    title: `تهانينا! 🎉`,
+                    message: `تم استلام مكافأة المستوى ${speedCupsRewardLevel} في أكواب السرعة بنجاح!`,
+                    confirmText: "رائع!",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${speedCupsRewardLevel}`,
+                    message: `متبقي ${targetPoints - speedCupsMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${speedCupsRewardLevel === 1 ? 50 : 100 + 50 * (speedCupsRewardLevel - 1)} XP\n` +
+                             `🔑 ${speedCupsRewardLevel} مفتاح\n` +
+                             `🔧 ${speedCupsRewardLevel} من كل وسيلة مساعدة`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`relative overflow-hidden group px-3 py-1 text-xs md:text-sm font-black rounded-lg transition-all shadow-sm active:scale-95 ${isReady ? 'bg-gradient-to-r from-pink-500 to-rose-500 text-white hover:from-pink-400 hover:to-rose-400 border-b-4 border-pink-700 active:border-b-0' : 'bg-white text-gray-400 border-2 border-gray-200 hover:bg-gray-50'}`}
+           >
+             {isReady && <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform" />}
+             {isReady ? 'استلام الهدايا 🎁' : 'صندوق الهدايا 🔒'}
+           </button>
+         </div>
+      </div>
+    );
+  };
+
+  
+  const renderDotsRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "dots_playing" && room.gameState !== "dots_finished")) return null;
+
+    const targetPoints = dotsRewardLevel * 100;
+    const progress = Math.min((dotsMatchPoints / targetPoints) * 100, 100);
+    const isReady = dotsMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+           <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+             <span>المستوي {dotsRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+               {dotsMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  setCustomConfirm({
+                     show: true,
+                     title: "مبروك! 🎉 اكتملت نقاط المستوي " + dotsRewardLevel,
+                     message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                              "🎁 " + (dotsRewardLevel === 1 ? 50 : 100 + 50 * (dotsRewardLevel - 1)) + " XP\n" +
+                              "🔑 " + dotsRewardLevel + " مفتاح\n" +
+                              "🔧 " + dotsRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                     confirmText: "نعم مشاهدة الاعلان",
+                     cancelText: "الغاء",
+                     onConfirm: () => {
+                       setCustomConfirm((prev) => ({ ...prev, show: false }));
+                       socket?.emit("bus_complete_ad_start", { roomId: room.id });
+                       showBusCompleteAd(
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                            socket?.emit("claim_dots_reward", { serial: socket?.data?.serial || playerSerial });
+                         },
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                            showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                         }
+                       );
+                     }
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${dotsRewardLevel}`,
+                    message: `متبقي ${targetPoints - dotsMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${dotsRewardLevel === 1 ? 50 : 100 + 50 * (dotsRewardLevel - 1)} XP\n` +
+                             `🔑 ${dotsRewardLevel} مفتاح\n` +
+                             `🔧 ${dotsRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+               ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600" : "bg-white text-blue-600 border border-blue-200 hover:bg-blue-50"}`}
+           >
+             <span>🎁</span>
+             <span>استلم الهدايا</span>
+           </button>
+         </div>
+      </div>
+    );
+  };
+
+  const __deprecated_renderDotsRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "dots_playing" && room.gameState !== "dots_finished")) return null;
+
+    const dotsRewardLevel = me?.dotsRewardLevel || 1;
+    const dotsMatchPoints = me?.dotsMatchPoints || 0;
+    const targetPoints = dotsRewardLevel * 100;
+    const progress = Math.min((dotsMatchPoints / targetPoints) * 100, 100);
+    const isReady = dotsMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full max-w-md mx-auto mb-2 md:mb-4 px-2">
+        <div className="bg-white rounded-xl md:rounded-2xl p-2 md:p-3 shadow-[0_4px_0_0_rgba(0,0,0,0.1)] border-2 border-gray-200">
+          <div className="flex justify-between items-center mb-1.5 md:mb-2">
+            <div className="flex items-center gap-1 md:gap-2">
+              <div className="bg-purple-100 text-purple-700 px-2 py-0.5 md:px-3 md:py-1 rounded-lg text-xs md:text-sm font-black border border-purple-200 flex items-center gap-1">
+                <span className="text-sm md:text-base">🏆</span>
+                مستوى {dotsRewardLevel}
+              </div>
+            </div>
+            <div className="text-[10px] md:text-xs font-black text-gray-500 bg-gray-100 px-2 py-0.5 md:px-3 md:py-1 rounded-full border border-gray-200">
+              {dotsMatchPoints} / {targetPoints}
+            </div>
+          </div>
+          
+          <div className="relative h-3 md:h-4 bg-gray-100 rounded-full overflow-hidden border border-gray-200">
+            <div 
+              className={`absolute top-0 left-0 h-full transition-all duration-1000 ease-out ${isReady ? 'bg-green-500 animate-pulse' : 'bg-gradient-to-r from-purple-400 to-purple-600'}`}
+              style={{ width: `${progress}%` }}
+            >
+              <div className="absolute top-0 left-0 w-full h-full bg-white/20 animate-[shimmer_2s_infinite]"></div>
+            </div>
+          </div>
+
+          <div className="mt-1.5 md:mt-2 text-center text-[10px] md:text-xs text-gray-500 font-bold flex items-center justify-center gap-1">
+             {isReady ? (
+               <button
+                 onClick={() => {
+                   playSound("click");
+                   socket?.emit("claim_dots_reward", { serial: me?.serial });
+                 }}
+                 className="w-full bg-green-500 hover:bg-green-600 text-white font-black py-1 px-3 rounded-lg shadow-sm transition-colors text-xs md:text-sm animate-pulse"
+               >
+                 استلام الجائزة الآن! 🎁
+               </button>
+             ) : (
+               <span className="flex items-center gap-1">
+                 العب واكسب نقاط لفتح هدايا المستوى القادم <span className="text-purple-500">🎁</span>
+               </span>
+             )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderIQRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "iq_playing" && room.gameState !== "iq_finished")) return null;
+
+    const targetPoints = iqRewardLevel * 100;
+    const progress = Math.min((iqMatchPoints / targetPoints) * 100, 100);
+    const isReady = iqMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+           <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+             <span>المستوي {iqRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+               {iqMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  setCustomConfirm({
+                     show: true,
+                     title: "مبروك! 🎉 اكتملت نقاط المستوي " + iqRewardLevel,
+                     message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                              "🎁 " + (iqRewardLevel === 1 ? 50 : 100 + 50 * (iqRewardLevel - 1)) + " XP\n" +
+                              "🔑 " + iqRewardLevel + " مفتاح\n" +
+                              "🔧 " + iqRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                     confirmText: "نعم مشاهدة الاعلان",
+                     cancelText: "الغاء",
+                     onConfirm: () => {
+                       setCustomConfirm((prev) => ({ ...prev, show: false }));
+                       socket?.emit("bus_complete_ad_start", { roomId: room.id });
+                       showBusCompleteAd(
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                            socket?.emit("claim_iq_reward", { serial: socket?.data?.serial || playerSerial });
+                         },
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                            showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                         }
+                       );
+                     }
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${iqRewardLevel}`,
+                    message: `متبقي ${targetPoints - iqMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${iqRewardLevel === 1 ? 50 : 100 + 50 * (iqRewardLevel - 1)} XP\n` +
+                             `🔑 ${iqRewardLevel} مفتاح\n` +
+                             `🔧 ${iqRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+               ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600" : "bg-white text-blue-600 border border-blue-200 hover:bg-blue-50"}`}
+           >
+             <span>🎁</span>
+             <span>استلم الهدايا</span>
+           </button>
+         </div>
+      </div>
+    );
+  };
+
+
+
+  const [wordleRewardLevel, setWordleRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_wordle_reward_level") || "1") || 1
+  );
+  const [wordleMatchPoints, setWordleMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_wordle_match_points") || "0") || 0
+  );
+  const [connectFourWordsRewardLevel, setConnectFourWordsRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_cfw_reward_level") || "1") || 1
+  );
+  const [connectFourWordsMatchPoints, setConnectFourWordsMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_cfw_match_points") || "0") || 0
+  );
+  const [spaceWarRewardLevel, setSpaceWarRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_space_war_reward_level") || "1") || 1
+  );
+  const [spaceWarMatchPoints, setSpaceWarMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_space_war_match_points") || "0") || 0
+  );
+  const [puzzleRewardLevel, setPuzzleRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_puzzle_reward_level") || "1") || 1
+  );
+  const [puzzleMatchPoints, setPuzzleMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_puzzle_match_points") || "0") || 0
+  );
+
+  const [beachRaceRewardLevel, setBeachRaceRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_beach_race_reward_level") || "1") || 1
+  );
+  const [beachRaceMatchPoints, setBeachRaceMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_beach_race_match_points") || "0") || 0
+  );
+
+  useEffect(() => {
+    localStorage.setItem("khamin_beach_race_reward_level", beachRaceRewardLevel.toString());
+  }, [beachRaceRewardLevel]);
+
+  useEffect(() => {
+    localStorage.setItem("khamin_beach_race_match_points", beachRaceMatchPoints.toString());
+  }, [beachRaceMatchPoints]);
+
+  useEffect(() => {
+    localStorage.setItem("khamin_wordle_reward_level", wordleRewardLevel.toString());
+  }, [wordleRewardLevel]);
+
+  useEffect(() => {
+    localStorage.setItem("khamin_wordle_match_points", wordleMatchPoints.toString());
+  }, [wordleMatchPoints]);
+  useEffect(() => {
+    localStorage.setItem("khamin_cfw_reward_level", connectFourWordsRewardLevel.toString());
+  }, [connectFourWordsRewardLevel]);
+  useEffect(() => {
+    localStorage.setItem("khamin_cfw_match_points", connectFourWordsMatchPoints.toString());
+  }, [connectFourWordsMatchPoints]);
+  useEffect(() => {
+    localStorage.setItem("khamin_space_war_reward_level", spaceWarRewardLevel.toString());
+  }, [spaceWarRewardLevel]);
+  useEffect(() => {
+    localStorage.setItem("khamin_space_war_match_points", spaceWarMatchPoints.toString());
+  }, [spaceWarMatchPoints]);
+  useEffect(() => {
+    localStorage.setItem("khamin_puzzle_reward_level", puzzleRewardLevel.toString());
+  }, [puzzleRewardLevel]);
+  useEffect(() => {
+    localStorage.setItem("khamin_puzzle_match_points", puzzleMatchPoints.toString());
+  }, [puzzleMatchPoints]);
+
+  const [bombPartyRewardLevel, setBombPartyRewardLevel] = useState(
+    () => parseInt(localStorage.getItem("khamin_bomb_reward_level") || "1") || 1
+  );
+  const [bombPartyMatchPoints, setBombPartyMatchPoints] = useState(
+    () => parseInt(localStorage.getItem("khamin_bomb_match_points") || "0") || 0
+  );
+
+  useEffect(() => {
+    localStorage.setItem("khamin_bomb_reward_level", bombPartyRewardLevel.toString());
+  }, [bombPartyRewardLevel]);
+
+  useEffect(() => {
+    localStorage.setItem("khamin_bomb_match_points", bombPartyMatchPoints.toString());
+  }, [bombPartyMatchPoints]);
+
+  const claimBombPartyReward = () => {
+    const targetPoints = bombPartyRewardLevel * 100;
+    if (bombPartyMatchPoints >= targetPoints) {
+      const remainingPoints = Math.max(0, bombPartyMatchPoints - targetPoints);
+      setBombPartyMatchPoints(remainingPoints);
+      localStorage.setItem("khamin_bomb_match_points", remainingPoints.toString());
+      setBombPartyRewardLevel((prev) => prev + 1);
+      localStorage.setItem("khamin_bomb_reward_level", (bombPartyRewardLevel + 1).toString());
+    }
+  };
+
+  const renderBeachRaceRewardBar = () => {
+    if (!room || room.gameState !== "beach_race_finished") return null;
+    const currentLevel = beachRaceRewardLevel;
+    const currentPoints = beachRaceMatchPoints;
+    const targetPoints = currentLevel * 100;
+    const progress = Math.min((currentPoints / targetPoints) * 100, 100);
+    const isReady = currentPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-amber-950/90 to-orange-950/90 border-2 border-amber-500/80 rounded-xl p-2 relative overflow-hidden transition-all shadow-md text-white">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-amber-500/30 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex items-center justify-between gap-1 z-10 w-full">
+            <div className="flex items-center gap-2 font-black text-xs sm:text-sm text-yellow-300">
+              <span>مستوى الجوائز {currentLevel}</span>
+              <span className="text-xs bg-black/60 px-1 py-0.5 rounded-md border border-amber-400 text-white" dir="ltr">
+                {currentPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + currentLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)) + " XP\n" +
+                               "🔑 " + currentLevel + " مفتاح\n" +
+                               "🔧 " + currentLevel + " من كل وسيلة مساعدة",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "إلغاء",
+                      onConfirm: () => {
+                        setCustomConfirm((prev) => ({ ...prev, show: false }));
+                        socket?.emit("bus_complete_ad_start", { roomId: room.id });
+                        showBusCompleteAd(
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                             socket?.emit("claim_beach_race_reward", { serial: socket?.data?.serial || playerSerial });
+                          },
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                             showAlert("تنبيه", "يجب مشاهدة الإعلان كاملاً لاستلام الجائزة");
+                          }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                      show: true,
+                      title: `المستوي ${currentLevel}`,
+                      message: `متبقي ${targetPoints - currentPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                               `🎁 ${currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)} XP\n` +
+                               `🔑 ${currentLevel} مفتاح\n` +
+                               `🔧 ${currentLevel} من كل وسيلة مساعدة`,
+                      confirmText: "حسناً",
+                      onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1 px-2 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-amber-400 text-slate-950 animate-pulse hover:bg-amber-300 border border-amber-200 cursor-pointer" : "bg-amber-900/80 text-yellow-300 border border-amber-600 hover:bg-amber-800 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+         </div>
+      </div>
+    );
+  };
+
+  const renderWordleRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "wordle_setup" && room.gameState !== "wordle_finished")) return null;
+    const currentLevel = wordleRewardLevel;
+    const currentPoints = wordleMatchPoints;
+    const targetPoints = currentLevel * 100;
+    const progress = Math.min((currentPoints / targetPoints) * 100, 100);
+    const isReady = currentPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-emerald-50 to-green-50 border-2 border-emerald-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-emerald-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+            <div className="flex items-center gap-2 font-bold text-emerald-800 text-sm">
+              <span>المستوي {currentLevel}</span>
+              <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-emerald-200" dir="ltr">
+                {currentPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + currentLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)) + " XP\n" +
+                               "🔑 " + currentLevel + " مفتاح\n" +
+                               "🔧 " + currentLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "الغاء",
+                      onConfirm: () => {
+                        setCustomConfirm((prev) => ({ ...prev, show: false }));
+                        socket?.emit("bus_complete_ad_start", { roomId: room.id }); // reuse visual ad lock
+                        showBusCompleteAd(
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                             socket?.emit("claim_wordle_reward", { serial: socket?.data?.serial || playerSerial });
+                          },
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                             showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                          }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                     show: true,
+                     title: `المستوي ${currentLevel}`,
+                     message: `متبقي ${targetPoints - currentPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                              `🎁 ${currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)} XP\n` +
+                              `🔑 ${currentLevel} مفتاح\n` +
+                              `🔧 ${currentLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                     confirmText: "حسناً",
+                     onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600 cursor-pointer" : "bg-white text-red-600 border border-red-200 hover:bg-red-50 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+          </div>
+       </div>
+    );
+  };
+
+const renderConnectFourWordsRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "connect_four_words_playing" && room.gameState !== "connect_four_words_finished")) return null;
+    const currentLevel = connectFourWordsRewardLevel;
+    const currentPoints = connectFourWordsMatchPoints;
+    const targetPoints = currentLevel * 100;
+    const progress = Math.min((currentPoints / targetPoints) * 100, 100);
+    const isReady = currentPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+            <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+              <span>المستوي {currentLevel}</span>
+              <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+                {currentPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + currentLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)) + " XP\n" +
+                               "🔑 " + currentLevel + " مفتاح\n" +
+                               "🔧 " + currentLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "الغاء",
+                      onConfirm: () => {
+                        setCustomConfirm((prev) => ({ ...prev, show: false }));
+                        socket?.emit("bus_complete_ad_start", { roomId: room.id }); 
+                        showBusCompleteAd(
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                             socket?.emit("claim_connect_four_words_reward", { serial: socket?.data?.serial || playerSerial });
+                          },
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                             showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                          }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                     show: true,
+                     title: `المستوي ${currentLevel}`,
+                     message: `متبقي ${targetPoints - currentPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                              `🎁 ${currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)} XP\n` +
+                              `🔑 ${currentLevel} مفتاح\n` +
+                              `🔧 ${currentLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                     confirmText: "حسناً",
+                     onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600 cursor-pointer" : "bg-white text-red-600 border border-red-200 hover:bg-red-50 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+          </div>
+       </div>
+    );
+  };
+const renderBombPartyRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "bomb_party_playing" && room.gameState !== "bomb_party_finished")) return null;
+
+    const targetPoints = bombPartyRewardLevel * 100;
+    const progress = Math.min((bombPartyMatchPoints / targetPoints) * 100, 100);
+    const isReady = bombPartyMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-red-50 to-orange-50 border-2 border-red-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-red-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+            <div className="flex items-center gap-2 font-bold text-red-800 text-sm">
+              <span>المستوي {bombPartyRewardLevel}</span>
+              <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-red-200" dir="ltr">
+                {bombPartyMatchPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + bombPartyRewardLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (bombPartyRewardLevel === 1 ? 50 : 100 + 50 * (bombPartyRewardLevel - 1)) + " XP\n" +
+                               "🔑 " + bombPartyRewardLevel + " مفتاح\n" +
+                               "🔧 " + bombPartyRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "الغاء",
+                      onConfirm: () => {
+                        setCustomConfirm((prev) => ({ ...prev, show: false }));
+                        socket?.emit("bus_complete_ad_start", { roomId: room.id }); // reuse visual ad lock
+                        showBusCompleteAd(
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                             socket?.emit("claim_bomb_party_reward", { serial: socket?.data?.serial || playerSerial, level: bombPartyRewardLevel });
+                             claimBombPartyReward();
+                          },
+                          () => {
+                             socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                             showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                          }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                     show: true,
+                     title: `المستوي ${bombPartyRewardLevel}`,
+                     message: `متبقي ${targetPoints - bombPartyMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                              `🎁 ${bombPartyRewardLevel === 1 ? 50 : 100 + 50 * (bombPartyRewardLevel - 1)} XP\n` +
+                              `🔑 ${bombPartyRewardLevel} مفتاح\n` +
+                              `🔧 ${bombPartyRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                     confirmText: "حسناً",
+                     onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600 cursor-pointer" : "bg-white text-red-600 border border-red-200 hover:bg-red-50 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+          </div>
+       </div>
+    );
+  };
+
+  const renderSpaceWarRewardBar = () => {
+    if (!room || (room.gameState !== "space_war_playing" && room.gameState !== "space_war_finished")) return null;
+
+    const currentLevel = spaceWarRewardLevel;
+    const currentPoints = spaceWarMatchPoints;
+    const targetPoints = currentLevel * 100;
+    const progress = Math.min((currentPoints / targetPoints) * 100, 100);
+    const isReady = currentPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-indigo-950/90 to-purple-950/90 border-2 border-indigo-500/80 rounded-xl p-2 relative overflow-hidden transition-all shadow-md text-white">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-indigo-500/30 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex items-center justify-between gap-1 z-10 w-full">
+            <div className="flex items-center gap-2 font-black text-xs sm:text-sm text-yellow-300">
+              <span>مستوى الجوائز {currentLevel}</span>
+              <span className="text-xs bg-black/60 px-1 py-0.5 rounded-md border border-indigo-400 text-white" dir="ltr">
+                {currentPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + currentLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)) + " XP\n" +
+                               "🔑 " + currentLevel + " مفتاح\n" +
+                               "🔧 " + currentLevel + " من كل وسيلة مساعدة",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "إلغاء",
+                      onConfirm: () => {
+                        setCustomConfirm(prev => ({...prev, show: false}));
+                        showBusCompleteAd(
+                           () => {
+                              socket?.emit("claim_space_war_reward", { serial: playerSerial });
+                           },
+                           () => {
+                              showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                           }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                      show: true,
+                      title: `المستوي ${currentLevel}`,
+                      message: `متبقي ${targetPoints - currentPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                               `🎁 ${currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)} XP\n` +
+                               `🔑 ${currentLevel} مفتاح\n` +
+                               `🔧 ${currentLevel} من كل وسيلة مساعدة`,
+                      confirmText: "حسناً",
+                      onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1 px-1 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-amber-400 text-slate-950 animate-pulse hover:bg-amber-300 border border-amber-200 cursor-pointer" : "bg-indigo-900/80 text-yellow-300 border border-indigo-600 hover:bg-indigo-800 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+         </div>
+      </div>
+    );
+  };
+
+  const renderPuzzleRewardBar = () => {
+    if (!room || (room.gameState !== "puzzle_playing" && room.gameState !== "puzzle_finished")) return null;
+
+    const currentLevel = puzzleRewardLevel;
+    const currentPoints = puzzleMatchPoints;
+    const targetPoints = currentLevel * 100;
+    const progress = Math.min((currentPoints / targetPoints) * 100, 100);
+    const isReady = currentPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-amber-950/90 to-orange-950/90 border-2 border-amber-500/80 rounded-xl p-2 relative overflow-hidden transition-all shadow-md text-white">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-amber-500/30 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex items-center justify-between gap-1 z-10 w-full">
+            <div className="flex items-center gap-2 font-black text-xs sm:text-sm text-yellow-300">
+              <span>مستوى الجوائز {currentLevel}</span>
+              <span className="text-xs bg-black/60 px-1 py-0.5 rounded-md border border-amber-400 text-white" dir="ltr">
+                {currentPoints} / {targetPoints}
+              </span>
+            </div>
+            
+            <button
+              onClick={() => {
+                 if (isReady) {
+                   setCustomConfirm({
+                      show: true,
+                      title: "مبروك! 🎉 اكتملت نقاط المستوي " + currentLevel,
+                      message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                               "🎁 " + (currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)) + " XP\n" +
+                               "🔑 " + currentLevel + " مفتاح\n" +
+                               "🔧 " + currentLevel + " من كل وسيلة مساعدة",
+                      confirmText: "نعم مشاهدة الاعلان",
+                      cancelText: "إلغاء",
+                      onConfirm: () => {
+                        setCustomConfirm(prev => ({...prev, show: false}));
+                        showBusCompleteAd(
+                           () => {
+                              socket?.emit("claim_puzzle_reward", { serial: playerSerial });
+                           },
+                           () => {
+                              showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                           }
+                        );
+                      }
+                   });
+                 } else {
+                   setCustomConfirm({
+                      show: true,
+                      title: `المستوي ${currentLevel}`,
+                      message: `متبقي ${targetPoints - currentPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                               `🎁 ${currentLevel === 1 ? 50 : 100 + 50 * (currentLevel - 1)} XP\n` +
+                               `🔑 ${currentLevel} مفتاح\n` +
+                               `🔧 ${currentLevel} من كل وسيلة مساعدة`,
+                      confirmText: "حسناً",
+                      onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                   });
+                 }
+              }}
+              className={`flex justify-center items-center gap-1 px-1 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+                ${isReady ? "bg-amber-400 text-slate-950 animate-pulse hover:bg-amber-300 border border-amber-200 cursor-pointer" : "bg-amber-900/80 text-yellow-300 border border-amber-600 hover:bg-amber-800 cursor-pointer"}`}
+            >
+              <span>🎁</span>
+              <span>استلم الهدايا</span>
+            </button>
+         </div>
+      </div>
+    );
+  };
+
+  const renderXORewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "xo_playing" && room.gameState !== "xo_finished")) return null;
+
+    const targetPoints = xoRewardLevel * 100;
+    const progress = Math.min((xoMatchPoints / targetPoints) * 100, 100);
+    const isReady = xoMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+           <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+             <span>المستوي {xoRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+               {xoMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  setCustomConfirm({
+                     show: true,
+                     title: "مبروك! 🎉 اكتملت نقاط المستوي " + xoRewardLevel,
+                     message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                              "🎁 " + (xoRewardLevel === 1 ? 50 : 100 + 50 * (xoRewardLevel - 1)) + " XP\n" +
+                              "🔑 " + xoRewardLevel + " مفتاح\n" +
+                              "🔧 " + xoRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                     confirmText: "نعم مشاهدة الاعلان",
+                     cancelText: "الغاء",
+                     onConfirm: () => {
+                       setCustomConfirm((prev) => ({ ...prev, show: false }));
+                       // We can use the same logic for showing ad as bus_complete but specific for xo
+                       socket?.emit("bus_complete_ad_start", { roomId: room.id }); // reuse visual ad lock
+                       showBusCompleteAd(
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                            socket?.emit("claim_xo_reward", { serial: socket?.data?.serial || playerSerial });
+                         },
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                            showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                         }
+                       );
+                     }
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${xoRewardLevel}`,
+                    message: `متبقي ${targetPoints - xoMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${xoRewardLevel === 1 ? 50 : 100 + 50 * (xoRewardLevel - 1)} XP\n` +
+                             `🔑 ${xoRewardLevel} مفتاح\n` +
+                             `🔧 ${xoRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+               ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600" : "bg-white text-blue-600 border border-blue-200 hover:bg-blue-50"}`}
+           >
+             <span>🎁</span>
+             <span>استلم الهدايا</span>
+           </button>
+         </div>
+      </div>
+    );
+  };
+
+  const renderHandRewardBar = () => {
+    if (!room || room.matchType !== "random" || (room.gameState !== "hand_playing" && room.gameState !== "hand_finished")) return null;
+
+    const targetPoints = handRewardLevel * 100;
+    const progress = Math.min((handMatchPoints / targetPoints) * 100, 100);
+    const isReady = handMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10 w-full">
+           <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+             <span>المستوي {handRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+               {handMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  setCustomConfirm({
+                     show: true,
+                     title: "مبروك! 🎉 اكتملت نقاط المستوي " + handRewardLevel,
+                     message: "يمكنك استلام هدايا هذا المستوى الآن، هل تود مشاهدة الإعلان؟\n\n" +
+                              "🎁 " + (handRewardLevel === 1 ? 50 : 100 + 50 * (handRewardLevel - 1)) + " XP\n" +
+                              "🔑 " + handRewardLevel + " مفتاح\n" +
+                              "🔧 " + handRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                     confirmText: "نعم مشاهدة الاعلان",
+                     cancelText: "الغاء",
+                     onConfirm: () => {
+                       setCustomConfirm((prev) => ({ ...prev, show: false }));
+                       socket?.emit("bus_complete_ad_start", { roomId: room.id }); 
+                       showBusCompleteAd(
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                            socket?.emit("claim_hand_reward", { serial: socket?.data?.serial || playerSerial });
+                         },
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                            showAlert("لم يكتمل الإعلان للحصول على المكافأة.", "عذراً");
+                         }
+                       );
+                     }
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${handRewardLevel}`,
+                    message: `متبقي ${targetPoints - handMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${handRewardLevel === 1 ? 50 : 100 + 50 * (handRewardLevel - 1)} XP\n` +
+                             `🔑 ${handRewardLevel} مفتاح\n` +
+                             `🔧 ${handRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+               ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600" : "bg-white text-blue-600 border border-blue-200 hover:bg-blue-50"}`}
+           >
+             <span>🎁</span>
+             <span>استلم الهدايا</span>
+           </button>
+         </div>
+      </div>
+    );
+  };
+  
+  const renderBusCompleteRewardBar = () => {
+    if (!room || room.matchType !== "random" || room.gameState !== "bus_complete_playing") return null;
+
+    const targetPoints = busCompleteRewardLevel * 100;
+    const progress = Math.min((busCompleteMatchPoints / targetPoints) * 100, 100);
+    const isReady = busCompleteMatchPoints >= targetPoints;
+
+    return (
+      <div className="w-full mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-2 relative overflow-hidden transition-all shadow-sm">
+         <div 
+           className="absolute top-0 left-0 bottom-0 bg-blue-100/50 transition-all duration-500 ease-out" 
+           style={{ width: `${progress}%` }}
+         />
+         <div className="relative flex sm:flex-row items-center justify-between gap-2 z-10">
+           <div className="flex items-center gap-2 font-bold text-blue-800 text-sm">
+             <span>المستوي {busCompleteRewardLevel}</span>
+             <span className="text-xs bg-white px-1.5 py-0.5 rounded-md border border-blue-200" dir="ltr">
+               {busCompleteMatchPoints} / {targetPoints}
+             </span>
+           </div>
+           
+           <button
+             onClick={() => {
+                if (isReady) {
+                  setCustomConfirm({
+                    show: true,
+                     title: "مبروك! 🎉 اكتملت نقاط المستوي " + busCompleteRewardLevel,
+                     message: "هل تود مشاهدة اعلان لاستلام هدايا هذا المستوي؟\n\n" +
+                              "🎁 " + (busCompleteRewardLevel === 1 ? 50 : 100 + 50 * (busCompleteRewardLevel - 1)) + " XP\n" +
+                              "🔑 " + busCompleteRewardLevel + " مفتاح\n" +
+                              "🔧 " + busCompleteRewardLevel + " من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)",
+                     confirmText: "نعم مشاهدة الاعلان",
+                     cancelText: "الغاء",
+                     onConfirm: () => {
+                       setCustomConfirm((prev) => ({ ...prev, show: false }));
+                       socket?.emit("bus_complete_ad_start", { roomId: room.id });
+                       showBusCompleteAd(
+                         () => {
+                            socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: true });
+                            socket?.emit("claim_bus_complete_reward", { serial: socket?.data?.serial || playerSerial });
+                         },
+                         () => {
+                           socket?.emit("bus_complete_ad_end", { roomId: room.id, completed: false });
+                         }
+                       );
+                     }
+                  });
+                } else {
+                  setCustomConfirm({
+                    show: true,
+                    title: `المستوي ${busCompleteRewardLevel}`,
+                    message: `متبقي ${targetPoints - busCompleteMatchPoints} من ${targetPoints} نقطة لاستلام الهدايا!\n\n` +
+                             `🎁 ${busCompleteRewardLevel === 1 ? 50 : 100 + 50 * (busCompleteRewardLevel - 1)} XP\n` +
+                             `🔑 ${busCompleteRewardLevel} مفتاح\n` +
+                             `🔧 ${busCompleteRewardLevel} من كل وسيلة مساعدة (تلميح، عدد الكلمات، كاشف الحروف، تجميد الوقت، الجاسوس)`,
+                    confirmText: "حسناً",
+                    onConfirm: () => setCustomConfirm(prev => ({...prev, show: false}))
+                  });
+                }
+             }}
+             className={`flex justify-center items-center gap-1.5 px-3 py-1 rounded-lg font-black text-xs transition-colors shadow-sm
+               ${isReady ? "bg-green-500 text-white animate-pulse hover:bg-green-600 border border-green-600" : "bg-white text-blue-600 border border-blue-200 hover:bg-blue-50"}`}
+           >
+             <span>🎁</span>
+             <span>استلم الهدايا</span>
+           </button>
+         </div>
+      </div>
+    );
+  };
+
   const renderUpdateBanner = () => {
     if (!needRefresh && !needsUpdate) return null;
     return createPortal(
@@ -19311,12 +21707,12 @@ export default function App() {
           <button
             onClick={async () => {
               try {
-                // Unregister all Service Workers
+                // Update all Service Workers to preserve push notifications subscription
                 if ("serviceWorker" in navigator) {
                   const registrations =
                     await navigator.serviceWorker.getRegistrations();
                   for (const registration of registrations) {
-                    await registration.unregister();
+                    await registration.update();
                   }
                 }
 
@@ -19818,9 +22214,9 @@ export default function App() {
               <div className="flex-1 flex flex-col p-4 overflow-hidden">
                 {/* Players Info */}
                 <div className="grid grid-cols-2 gap-4 mb-4">
-                  {spectatorRoomData.players.map((p: any) => (
+                  {spectatorRoomData.players.map((p: any, idx: number) => (
                     <div
-                      key={p.serial}
+                      key={p.serial || p.id || `spec-${idx}`}
                       className="bg-white/5 rounded-2xl p-3 border border-white/10 flex items-center gap-3"
                     >
                       <div className="w-10 h-10">
@@ -19876,7 +22272,7 @@ export default function App() {
                   <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 items-center justify-center">
                     {spectatorRoomData.players.map((p: any, idx: number) => (
                       <div
-                        key={p.serial}
+                        key={p.serial || p.id || `spec-p-${idx}`}
                         className="flex flex-col items-center gap-2"
                       >
                         <div className="text-white/60 text-[10px] font-black">
@@ -19885,7 +22281,9 @@ export default function App() {
                         <div className="relative w-full max-w-[200px] aspect-square rounded-xl overflow-hidden shadow-xl border-2 border-white/10 bg-black/20">
                           {p.targetImage ? (
                             <img
-                              src={p.targetImage.image}
+                              src={resolveGameImageUrl(
+                                p.targetImage.image || p.targetImage.url,
+                              )}
                               alt={`Target for ${p.name}`}
                               className="w-full h-full object-cover"
                               referrerPolicy="no-referrer"
@@ -19945,12 +22343,13 @@ export default function App() {
                             </span>
                           </div>
                           <div className="bg-white/10 text-white px-4 py-2 rounded-2xl text-sm font-bold max-w-[80%] break-words">
-                            {msg.text}
+                            {msg.senderId === socket?.id ? (msg.originalText || msg.text) : msg.text}
                           </div>
                         </div>
                       ),
                     )
                   )}
+                  <div ref={spectatorChatEndRef} />
                 </div>
 
                 <div className="p-4 bg-red-500/10 border-t border-red-500/20">
@@ -20096,7 +22495,7 @@ export default function App() {
     return (
       <>
         {renderUpdateBanner()}
-        <div className="min-h-screen w-full flex items-center justify-center p-4 overflow-y-auto pt-24">
+        <div className="min-h-screen w-full flex flex-col items-center justify-center gap-4 p-4 overflow-y-auto pt-24">
           {/* Fixed Header */}
           <header className="fixed top-0 left-0 right-0 bg-white/95 backdrop-blur-md px-1 md:px-6 flex justify-between items-center z-[2000] border-b-4 border-black h-14 md:h-16">
             <div className="flex-1 flex items-center gap-1 md:gap-3">
@@ -20116,6 +22515,7 @@ export default function App() {
               {/* Home Button (Cancels Search) */}
               <button
                 onClick={() => {
+                  MatchmakingService.cancelActiveSearch();
                   socket?.emit("leave_matchmaking");
                   resetToHome();
                 }}
@@ -20145,10 +22545,16 @@ export default function App() {
               {/* Shop Button */}
               <button
                 onClick={toggleShop}
-                className="w-9 h-9 md:w-10 md:h-10 bg-orange-100 text-black border-2 border-black rounded-xl flex items-center justify-center hover:bg-orange-200 transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+                className="relative w-9 h-9 md:w-10 md:h-10 bg-orange-100 text-black border-2 border-black rounded-xl flex items-center justify-center hover:bg-orange-200 transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
                 title="المتجر"
               >
                 <ShoppingCart className="w-4 h-4 md:w-5 md:h-5" />
+                {hasNewStoreOffers && (
+                  <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white"></span>
+                  </span>
+                )}
               </button>
 
               {/* Notifications Button */}
@@ -20309,12 +22715,16 @@ export default function App() {
                         onClick={() => {
                           playSound("clickOpen");
                           setHasResponded(true);
-                          socket?.emit("respond_to_match", {
-                            matchId: proposedMatch.matchId,
-                            response: "accept",
-                          });
+                          if (socket && isConnected) {
+                            socket.emit("respond_to_match", {
+                              matchId: proposedMatch.matchId,
+                              response: "accept",
+                            });
+                          } else {
+                            handleServerlessMatchAccept(proposedMatch);
+                          }
                         }}
-                        className="flex-1 btn-game btn-success py-3 md:py-4 text-lg md:text-xl animate-pulse"
+                        className="flex-1 btn-game btn-success py-3 md:py-4 text-x1 md:text-xl animate-pulse"
                       >
                         قبول التحدي! ⚔️
                       </button>
@@ -20322,11 +22732,14 @@ export default function App() {
                         onClick={() => {
                           playSound("clickOpen");
                           setHasResponded(true);
-                          socket?.emit("respond_to_match", {
-                            matchId: proposedMatch.matchId,
-                            response: "reject",
-                          });
+                          if (socket && isConnected) {
+                            socket.emit("respond_to_match", {
+                              matchId: proposedMatch.matchId,
+                              response: "reject",
+                            });
+                          }
                           setProposedMatch(null);
+                          setMatchResponseTimeLeft(null);
                         }}
                         className="flex-1 btn-game btn-danger py-3 md:py-4 text-lg md:text-xl"
                       >
@@ -20396,9 +22809,10 @@ export default function App() {
                     onClick={() => {
                       setIsSearching(false);
                       setJoined(false);
+                      MatchmakingService.cancelActiveSearch();
                       socket?.emit("leave_matchmaking");
                       setRoomId((prev) =>
-                        prev.startsWith("random_") ? "" : prev,
+                        prev.startsWith("random_") || prev === "waiting_friend" ? "" : prev,
                       );
                     }}
                     className="w-full btn-game btn-danger py-3 md:py-4 text-lg md:text-xl"
@@ -20409,6 +22823,8 @@ export default function App() {
               </>
             )}
           </div>
+
+          <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
 
           {renderModals()}
         </div>
@@ -20473,18 +22889,7 @@ export default function App() {
 
     return (
       <div className="fixed inset-0 bg-black/85 z-[10000] overflow-hidden h-screen w-screen touch-none select-none flex justify-center">
-        <style>{`
-          @keyframes fall {
-            0% { transform: translateY(-100px); opacity: 0; }
-            10% { opacity: 1; }
-            90% { opacity: 1; }
-            100% { transform: translateY(110vh); opacity: 0; }
-          }
-          .gift-fall {
-            animation: fall linear forwards;
-            will-change: transform, opacity;
-          }
-        `}</style>
+        
 
         <div className="relative w-full max-w-md h-full mx-auto">
           {/* Header with Timer and Close Button */}
@@ -20901,10 +23306,16 @@ export default function App() {
             {/* Shop Button */}
             <button
               onClick={toggleShop}
-              className="w-9 h-9 md:w-10 md:h-10 bg-orange-100 text-black border-2 border-black rounded-xl flex items-center justify-center hover:bg-orange-200 transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+              className="relative w-9 h-9 md:w-10 md:h-10 bg-orange-100 text-black border-2 border-black rounded-xl flex items-center justify-center hover:bg-orange-200 transition-colors shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
               title="المتجر"
             >
               <ShoppingCart className="w-4 h-4 md:w-5 md:h-5" />
+              {hasNewStoreOffers && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white"></span>
+                </span>
+              )}
             </button>
 
             {/* Notifications Button */}
@@ -20962,7 +23373,7 @@ export default function App() {
             className="w-full max-w-md py-2"
           >
             {/* Profile Card */}
-            <div className="player-card flex flex-col p-3 md:p-4 mb-4 md:mb-4 w-full">
+            <div className="player-card flex flex-col p-2 md:p-3 mb-4 md:mb-4 w-full">
               <AnimatedXp xp={xp} joined={joined}>
                 {(displayXp) => (
                   <div className="flex items-center gap-2 md:gap-4 flex-row-reverse w-full">
@@ -21109,7 +23520,7 @@ export default function App() {
                     className="bg-white/50 px-0.5 md:px-1 flex items-center gap-0.5"
                     title="فوز متتالي"
                   >
-                    <span className="text-[11px] md:text-[12px]">🔥</span>{" "}
+                    <span className="text-[12px] md:text-[13px]">🔥</span>{" "}
                     <span className="text-[11px] md:text-[12px]">
                       {streak || 0}
                     </span>
@@ -21199,97 +23610,100 @@ export default function App() {
                   playSound("clickOpen");
                   setShowFriendsModal(true);
                 }}
-                className="w-full px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-black rounded-lg text-sm transition-colors border border-blue-200 flex items-center justify-center gap-2"
+                className="w-full px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-black rounded-lg text-sm transition-colors border border-blue-200 flex items-center justify-center mb-2 gap-2"
               >
                 <Users
                   className={`w-4 h-4 ${friendsList.some((f) => f.isOnline) ? "text-green-500 fill-green-500" : ""}`}
                 />
                 الأصدقاء ({friendsTotal})
               </button>
-            </div>
 
-            {/* Collection Icons - Moved outside player card */}
-            <div className="flex items-center justify-center gap-1.5 mb-4 flex-wrap">
-              {COLLECTION_DATA.map((cat) => {
-                const hasAny = playerCollection.some((c) => {
-                  const catImages = cat.stages.flatMap((s) =>
-                    s.images.map((img) => normalizeEgyptian(img).toLowerCase()),
-                  );
-                  return catImages.includes(c.image_name);
-                });
-
-                const currentCount = cat.stages
-                  .flatMap((s) => s.images)
-                  .reduce((acc, img) => {
-                    const norm = normalizeEgyptian(img).toLowerCase();
-                    const count =
-                      playerCollection.find((c) => c.image_name === norm)
-                        ?.count || 0;
-                    return acc + count;
-                  }, 0);
-
-                const hasNewImage =
-                  currentCount > (seenCategoryCounts[cat.id] || 0);
-
-                const hasClaimableReward = cat.stages.some((stage) => {
-                  const isClaimed = claimedCollectionRewards.some(
-                    (r) => r.category_id === cat.id && r.stage === stage.stage,
-                  );
-                  if (isClaimed) return false;
-
-                  const isStageComplete = stage.images.every((imgName) => {
-                    const norm = normalizeEgyptian(imgName).toLowerCase();
-                    const count =
-                      playerCollection.find((c) => c.image_name === norm)
-                        ?.count || 0;
-                    return count >= 5;
+              {/* Collection Icons - Moved outside player card */}
+              <div className="flex flex-1 items-center justify-center gap-0.5 md:gap-1.5">
+                {COLLECTION_DATA.map((cat) => {
+                  const hasAny = playerCollection.some((c) => {
+                    const catImages = cat.stages.flatMap((s) =>
+                      s.images.map((img) => normalizeEgyptian(img).toLowerCase()),
+                    );
+                    return catImages.includes(c.image_name);
                   });
 
-                  return isStageComplete;
-                });
+                  const currentCount = cat.stages
+                    .flatMap((s) => s.images)
+                    .reduce((acc, img) => {
+                      const norm = normalizeEgyptian(img).toLowerCase();
+                      const count =
+                        playerCollection.find((c) => c.image_name === norm)
+                          ?.count || 0;
+                      return acc + count;
+                    }, 0);
 
-                return (
-                  <button
-                    key={cat.id}
-                    onClick={() => {
-                      playSound("clickOpen");
-                      setShowCollectionModal(cat.id);
-                      if (hasNewImage) {
-                        const newCounts = {
-                          ...seenCategoryCounts,
-                          [cat.id]: currentCount,
-                        };
-                        setSeenCategoryCounts(newCounts);
-                        localStorage.setItem(
-                          "khamin_seen_category_counts",
-                          JSON.stringify(newCounts),
-                        );
-                      }
-                    }}
-                    className={`relative w-9 h-9 md:w-11 md:h-11 rounded-xl border-2 border-black flex items-center justify-center text-lg md:text-xl transition-all shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] active:translate-y-0.5 active:shadow-none ${
-                      hasAny
-                        ? "bg-white opacity-100"
-                        : "bg-white opacity-70 grayscale"
-                    }`}
-                  >
-                    {cat.icon}
-                    {(hasClaimableReward || hasNewImage) && (
-                      <span className="absolute -top-1 -right-1 flex h-4 w-4">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white"></span>
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+                  const hasNewImage =
+                    currentCount > (seenCategoryCounts[cat.id] || 0);
+
+                  const hasClaimableReward = cat.stages.some((stage) => {
+                    const isClaimed = claimedCollectionRewards.some(
+                      (r) => r.category_id === cat.id && r.stage === stage.stage,
+                    );
+                    if (isClaimed) return false;
+
+                    const isStageComplete = stage.images.every((imgName) => {
+                      const norm = normalizeEgyptian(imgName).toLowerCase();
+                      const count =
+                        playerCollection.find((c) => c.image_name === norm)
+                          ?.count || 0;
+                      return count >= 5;
+                    });
+
+                    return isStageComplete;
+                  });
+
+                  return (
+                    <button
+                      key={cat.id}
+                      onClick={() => {
+                        playSound("clickOpen");
+                        setShowCollectionModal(cat.id);
+                        if (playerSerial) {
+                          fetchCollection(playerSerial, true);
+                        }
+                        if (hasNewImage) {
+                          const newCounts = {
+                            ...seenCategoryCounts,
+                            [cat.id]: currentCount,
+                          };
+                          setSeenCategoryCounts(newCounts);
+                          localStorage.setItem(
+                            "khamin_seen_category_counts",
+                            JSON.stringify(newCounts),
+                          );
+                        }
+                      }}
+                      className={`relative w-9 h-9 md:w-11 md:h-11 rounded-xl border-2 border-black flex items-center justify-center text-lg md:text-xl transition-all active:translate-y-0.5 active:shadow-none ${
+                        hasAny
+                          ? "bg-white opacity-100"
+                          : "bg-white opacity-70 grayscale"
+                      }`}
+                    >
+                      {cat.icon}
+                      {(hasClaimableReward || hasNewImage) && (
+                        <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-4 w-4 bg-red-500 border-2 border-white"></span>
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            <div className="card-game p-3 md:p-5">
+            <div className="card-game px-2 md:px-3 pt-2 md:pt-3 pb-0.5">
               <div className="space-y-4 md:space-y-6">
                 {/* Top Players Section */}
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col mb-2 gap-2">
                   {/* Podium Box with Integrated Header */}
-                  <div className="box-game px-3 md:px-5 pb-2 pt-4 mt-2 relative">
+                  <div className="box-game px-2 md:px-3 pb-2 pt-4 relative">
                     {/* Integrated Header */}
                     <div className="flex items-center justify-between flex-row-reverse mb-8 pb-2">
                       <h2 className="text-sm md:text-base font-black text-main flex items-center gap-2">
@@ -21327,20 +23741,20 @@ export default function App() {
                               2
                             </div>
                           </div>
-                          <div className="text-[10px] md:text-xs font-black text-main truncate w-full text-center max-w-[80px] md:max-w-[100px]" dir="ltr">
+                          <div className="text-[10px] md:text-xs font-black text-main truncate w-full text-center max-w-[80px] md:max-w-[100px]">
                             {truncateName(topPlayers[1].name)}
                           </div>
-                          <div className="w-full rank-2-bar h-20 md:h-24 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-1 md:gap-1.5">
+                          <div className="w-full rank-2-bar h-22 md:h-24 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-0.5 md:gap-1">
                             <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5">
-                              Lvl {getLevel(topPlayers[1].xp || 0)}
+                              Lvl {limit99(getLevel(topPlayers[1].xp || 0))}
                             </div>
                             <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5 flex items-center gap-1">
                               <Trophy className="w-2 h-2" />
-                              {topPlayers[1].wins || 0} فوز
+                              {limit99(topPlayers[1].wins || 0)} فوز
                             </div>
-                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5 flex items-center justify-center gap-1">
-                              <span>{topPlayers[1].streak || 0} 🔥</span>
-                              <span>{topPlayers[1].likes || 0} ❤️</span>
+                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5 flex flex-wrap items-center justify-center gap-1">
+                              <span>{limit99(topPlayers[1].streak || 0)} 🔥</span>
+                              <span>{limit99(topPlayers[1].likes || 0)} ❤️</span>
                             </div>
                           </div>
                         </div>
@@ -21378,20 +23792,20 @@ export default function App() {
                               1
                             </div>
                           </div>
-                          <div className="text-xs md:text-sm font-black text-main truncate w-full text-center mt-2 max-w-[90px] md:max-w-[120px]" dir="ltr">
+                          <div className="text-xs md:text-sm font-black text-main truncate w-full text-center mt-2 max-w-[90px] md:max-w-[120px]">
                             {truncateName(topPlayers[0].name)}
                           </div>
-                          <div className="w-full rank-1-bar h-24 md:h-32 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-1 md:gap-2">
-                            <div className="text-[9px] md:text-xs font-black text-black/80 px-3 py-1 ">
-                              Lvl {getLevel(topPlayers[0].xp || 0)}
+                          <div className="w-full rank-1-bar h-24 md:h-32 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-0.5 md:gap-1.5">
+                            <div className="text-[9px] md:text-xs font-black text-black/80 px-1 py-0.5 pt-0.5 ">
+                              Lvl {limit99(getLevel(topPlayers[0].xp || 0))}
                             </div>
-                            <div className="text-[9px] md:text-xs font-black text-black/80 px-3 py-1 flex items-center gap-1">
+                            <div className="text-[9px] md:text-xs font-black text-black/80 px-1 py-0.5 pt-0.5 flex items-center gap-1">
                               <Trophy className="w-3 h-3" />
-                              {topPlayers[0].wins || 0} فوز
+                              {limit99(topPlayers[0].wins || 0)} فوز
                             </div>
-                            <div className="text-[9px] md:text-xs font-black text-black/80 px-3 py-1 flex items-center justify-center gap-1">
-                              <span>{topPlayers[0].streak || 0} 🔥</span>
-                              <span>{topPlayers[0].likes || 0} ❤️</span>
+                            <div className="text-[7px] md:text-[9px] font-black text-black/80 px-1 md:px-2 py-1 flex flex-wrap items-center justify-center gap-1">
+                              <span>{limit99(topPlayers[0].streak || 0)} 🔥</span>
+                              <span>{limit99(topPlayers[0].likes || 0)} ❤️</span>
                             </div>
                           </div>
                         </div>
@@ -21423,180 +23837,43 @@ export default function App() {
                               3
                             </div>
                           </div>
-                          <div className="text-[10px] md:text-xs font-black text-main truncate w-full text-center max-w-[80px] md:max-w-[100px]" dir="ltr">
+                          <div className="text-[10px] md:text-xs font-black text-main truncate w-full text-center max-w-[80px] md:max-w-[100px]">
                             {truncateName(topPlayers[2].name)}
                           </div>
-                          <div className="w-full rank-3-bar h-16 md:h-20 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-0.5 md:gap-1">
-                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5">
-                              Lvl {getLevel(topPlayers[2].xp || 0)}
+                          <div className="w-full rank-3-bar h-20 md:h-20 rounded-t-xl mt-1 shadow-inner border-t-4 flex flex-col items-center justify-center gap-1 md:gap-1.5">
+                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.2 pt-0.2">
+                              Lvl {limit99(getLevel(topPlayers[2].xp || 0))}
                             </div>
-                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5 flex items-center gap-1">
+                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.2 pt-0.2 flex items-center gap-1">
                               <Trophy className="w-2 h-2" />
-                              {topPlayers[2].wins || 0} فوز
+                              {limit99(topPlayers[2].wins || 0)} فوز
                             </div>
-                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-2 py-0.5 flex items-center justify-center gap-1">
-                              <span>{topPlayers[2].streak || 0} 🔥</span>
-                              <span>{topPlayers[2].likes || 0} ❤️</span>
+                            <div className="text-[8px] md:text-[9px] font-black text-black/80 px-1 md:px-2 py-0.2 pt-0.2 flex flex-wrap items-center justify-center gap-1">
+                              <span>{limit99(topPlayers[2].streak || 0)} 🔥</span>
+                              <span>{limit99(topPlayers[2].likes || 0)} ❤️</span>
                             </div>
                           </div>
                         </div>
                       )}
                     </div>
 
-                    <div className="text-center">
-                      <p className="text-[8px] md:text-[10px] font-bold text-black-400 py-1 px-1 inline-block">
-                        الترتيب يعتمد فقط علي اللعب داخل مباريات البحث العشوائي
-                        📊
-                      </p>
-                    </div>
-
-                    {/* Top Players Special Categories Banner (Not Top 3) */}
-                    {(() => {
-                      const topSerials = topPlayers
-                        .slice(0, 3)
-                        .map((p) => p.serial);
-                      const specialPlayers = new Map<
-                        string,
-                        {
-                          player: any;
-                          categories: {
-                            label: string;
-                            displayVal: string | number;
-                            icon: string;
-                          }[];
-                        }
-                      >();
-
-                      const addSpecialPlayer = (
-                        players: any[] | undefined,
-                        val: number,
-                        label: string,
-                        icon: string,
-                        valueFormatter: (v: number, p: any) => string | number,
-                      ) => {
-                        if (players && players.length > 0 && val > 0) {
-                          const p = players.find(
-                            (p) => !topSerials.includes(p.serial) && !p.isAdmin,
-                          );
-                          if (p) {
-                            if (!specialPlayers.has(p.serial)) {
-                              specialPlayers.set(p.serial, {
-                                player: p,
-                                categories: [],
-                              });
-                            }
-                            const pData = specialPlayers.get(p.serial)!;
-                            pData.categories.push({
-                              label,
-                              displayVal: valueFormatter(val, p),
-                              icon,
-                            });
-                          }
-                        }
-                      };
-
-                      addSpecialPlayer(
-                        highestLevelPlayers,
-                        highestLevelValue,
-                        "الأعلي مستوى",
-                        "⭐",
-                        (val, p) => getLevel(p.xp),
-                      );
-                      addSpecialPlayer(
-                        highestStreakPlayers,
-                        highestStreakValue,
-                        "فوز متتالي",
-                        "🔥",
-                        (val, p) => p.streak || val,
-                      );
-                      addSpecialPlayer(
-                        highestLikesPlayers,
-                        highestLikesValue,
-                        "الأكثر قلوب",
-                        "❤️",
-                        (val, p) => p.likes || val,
-                      );
-
-                      const specialList = Array.from(specialPlayers.values());
-
-                      if (specialList.length === 0) return null;
-
-                      return (
-                        <div
-                          className={`mt-0.5 mb-2 grid gap-1.5 md:gap-2 ${specialList.length === 1 ? "grid-cols-1" : specialList.length === 2 ? "grid-cols-2" : "grid-cols-3"}`}
-                        >
-                          {specialList.map(({ player, categories }) => (
-                            <div
-                              key={player.serial}
-                              className="bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-xl p-1.5 md:p-2 flex flex-col items-center gap-1.5 cursor-pointer hover:from-amber-500/20 hover:to-orange-500/20 transition-all border border-amber-500/20 box-game"
-                              onClick={() => openPlayerProfile(player.serial)}
-                            >
-                              <div
-                                className={`flex ${categories.length > 1 ? "gap-1" : "gap-0.5"} w-full bg-black/5 rounded-md py-0.5 items-center text-center flex-1`}
-                              >
-                                {categories.map((c, i) => (
-                                  <div
-                                    key={i}
-                                    className={`flex flex-col items-center w-full ${categories.length > 1 ? "bg-black/5 rounded-md py-0.5" : ""}`}
-                                  >
-                                    <span
-                                      className={`font-bold md:font-black text-orange-600/80 leading-tight ${specialList.length === 3 ? "text-[7px] md:text-[9px]" : "text-[8px] md:text-[9px]"}`}
-                                    >
-                                      {c.label}
-                                    </span>
-                                    <span
-                                      className={`font-black text-main flex items-center gap-0.5 justify-center mt-0.5 ${specialList.length === 3 ? "text-[10px] md:text-sm" : "text-xs md:text-sm"}`}
-                                    >
-                                      {c.displayVal}{" "}
-                                      <span
-                                        className={
-                                          specialList.length === 3
-                                            ? "text-[9px]"
-                                            : "text-xs md:text-sm"
-                                        }
-                                      >
-                                        {c.icon}
-                                      </span>
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-
-                              <div
-                                className={`relative flex items-center justify-center shrink-0 ${specialList.length === 3 ? "w-8 h-8 md:w-11 md:h-11 mt-1" : "w-10 h-10 md:w-12 md:h-12 mt-1"}`}
-                              >
-                                {renderAvatarContent(
-                                  player.avatar,
-                                  getLevel(player.xp),
-                                  false,
-                                  player.isOnline,
-                                  player.selectedFrame,
-                                  player.serial,
-                                )}
-                              </div>
-
-                              <span
-                                className={`font-black text-main w-full text-center truncate px-0.5 shrink-0 ${specialList.length === 3 ? "text-[8px] md:text-xs" : "text-[10px] md:text-xs"}`}
-                              >
-                                {truncateName(player.name)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })()}
-
                     {/* Player Rank Info */}
                     {(() => {
-                      const myRankIndex = topPlayers.findIndex(
-                        (p) => p.serial === playerSerial,
-                      );
-                      if (myRankIndex >= 0) {
-                        const isTop3 = myRankIndex <= 2;
+                      let myRank = myLeaderboardRank;
+                      if (myRank === null) {
+                        const idx = topPlayers.findIndex(
+                          (p) => p.serial === playerSerial,
+                        );
+                        if (idx >= 0) myRank = idx + 1;
+                        else if (topPlayers.length >= 100) myRank = -1;
+                      }
+
+                      if (myRank !== null && myRank > 0) {
+                        const isTop3 = myRank <= 3;
                         return (
                           <button
                             onClick={handleOpenshowLeaderboardModal}
-                            className={`w-full group relative overflow-hidden ${isTop3 ? "bg-yellow-500" : "bg-orange-500"} rounded-none p-0.5 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] border-4 border-black hover:-translate-y-1 transition-all`}
+                            className={`w-full mt-1 group relative overflow-hidden ${isTop3 ? "bg-yellow-500" : "bg-orange-500"} rounded-none p-0.5 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] border-4 border-black hover:-translate-y-1 transition-all`}
                           >
                             <div className="bg-white h-10 rounded-[14px] py-3 px-4 flex items-center justify-between">
                               <div className="flex items-center gap-2 text-black">
@@ -21608,7 +23885,7 @@ export default function App() {
                                 <span
                                   className={`font-black text-lg md:text-xl ${isTop3 ? "bg-yellow-100 text-yellow-600" : "bg-orange-100 text-orange-600"} px-2 rounded-lg`}
                                 >
-                                  #{myRankIndex + 1}
+                                  #{myRank}
                                 </span>
                                 <span className="text-lg">
                                   {isTop3 ? "👑" : "💪"}
@@ -21627,7 +23904,7 @@ export default function App() {
                             </div>
                           </button>
                         );
-                      } else if (myRankIndex === -1 && topPlayers.length > 0) {
+                      } else if (myRank === -1 || (myRank === null && topPlayers.length > 0)) {
                         return (
                           <button
                             onClick={handleOpenshowLeaderboardModal}
@@ -21681,7 +23958,7 @@ export default function App() {
                                 "تنبيه",
                               );
                             }}
-                            className="flex items-center gap-1 bg-white/80 px-1 py-0.5 rounded-lg border-2 border-2 hover:bg-white transition-colors"
+                            className="flex items-center gap-1 bg-white/80 px-2 py-0.5 rounded-lg border-2 border-2 hover:bg-white transition-colors"
                           >
                             <span className="text-sm font-bold text-accent-orange">
                               {keys}/5
@@ -21769,7 +24046,7 @@ export default function App() {
                                 isRainGiftActive
                               )
                             }
-                            className={`px-2 md:px-6 py-2 rounded-xl font-bold md:font-black md:text-[13px] text-[10px] transition-all shadow-md ${
+                            className={`px-2 py-2 rounded-xl font-bold md:font-black md:text-[13px] text-[10px] transition-all shadow-md ${
                               localStorage.getItem(
                                 "khamin_pending_rain_gift",
                               ) ||
@@ -21815,18 +24092,18 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="pt-3 md:pt-3 border-t-2 border-game space-y-3 md:space-y-4">
-                  <div className="flex items-center font-bold md:text-sm text-xs gap-1">
+                <div className="pt-1 md:pt-1 space-y-3 md:space-y-4">
+                  <div className="flex items-center font-bold md:text-sm text-xs mb-1 gap-1">
                     <button
                       onClick={() => {
                         playSound("clickOpen");
                         setShowPlayerSearchModal(true);
                       }}
-                      className="bg-gray-300 py-1 px-1 border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:bg-purple-200 flex items-center gap-1 hover:text-purple-600 transition-colors"
+                      className="bg-gray-300 py-0.5 px-2 border-2 border-black hover:bg-purple-200 flex items-center gap-1 hover:text-purple-600 transition-colors"
                     >
                       <Users className="w-4 h-4" />
                       إجمالي اللاعبين:{" "}
-                      <span className="text-purple-600 bg-purple-100 px-2 py-0.5 rounded-full">
+                      <span className="text-purple-600 bg-purple-100 px-2 py-0.2 rounded-full">
                         {totalPlayersCount}
                       </span>
                     </button>
@@ -21834,125 +24111,187 @@ export default function App() {
                       متصل: {onlineCount > 1000 ? "1000+" : onlineCount}
                     </span>
                   </div>
-                  <div className="pt-2 md:pt-3 border-t-2 border-game">
+                    
+                  </div>
+                </div>
+
+                </div>
+
+              <div className="play-bg border-2 border-black shadow-lg mt-4 p-0.5 md:p-2">
+                <div className="p-1 flex flex-wrap relative items-center justify-center">
+
+                  <label className="flex flex-col items-center justify-center  h-[70px] md:h-[90px] font-bold mb-2 px-1">
+                      <h3 className="text-white text-[25px] md:text-[30px] mb-1 md:mb-2 font-black home-title-stroke-sm">جاهز للعب؟</h3>
+                      <span className="bg-gray-200 border-2 border-black p-1 text-[10px] md:text-sm">اختار طريقة اللعب وابدأ التحدي!</span>
+                  </label>
+
+                  <div className="relative w-full flex flex-wrap grid grid-cols-2 gap-2 items-center justify-center" dir="ltr">
+                  <AnimatePresence>
                     {error && (
                       <motion.div
                         ref={errorRef}
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
-                        className="bg-red-100 border-2 border-red-200 p-2 md:p-4 mb-2 md:mb-4 text-red-600 text-xs md:text-sm font-black rounded-2xl text-center shadow-sm"
+                        exit={{ opacity: 0, x: 10 }}
+                        className="absolute top-1 w-full flex bg-red-100 border-2 border-red-500 p-1 md:p-2 mb-2 md:mb-2 text-red-600 text-xs md:text-sm font-bold items-center justify-center text-center z-[200]"
+                        dir="rtl"
                       >
                         {error}
                       </motion.div>
                     )}
-                    <label className="block text-base md:text-lg font-bold text-main mb-1 md:mb-2 px-1">
-                      إنشاء / دخول بكود غرفة
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={roomId}
-                        onChange={(e) => {
-                          // Normalize Arabic numbers to English
-                          const val = e.target.value.replace(/[٠-٩]/g, (d) =>
-                            "٠١٢٣٤٥٦٧٨٩".indexOf(d).toString(),
-                          );
-                          setRoomId(val);
-                        }}
-                        placeholder="أكتب كود الغرفة..."
-                        className="input-game flex-1 py-2 md:py-4"
-                        maxLength={6}
-                      />
-                      <button
-                        onClick={handleJoin}
-                        disabled={!isConnected}
-                        className={`btn-game btn-secondary px-4 md:px-6 py-2 md:py-3 text-base md:text-lg ${!isConnected ? "opacity-50 cursor-not-allowed" : ""}`}
-                      >
-                        {isConnected ? "دخول" : "جاري الاتصال..."}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="relative py-1 md:py-2">
-                    <div className="absolute inset-0 flex items-center">
-                      <div className="w-full border-t-2 border-game dashed"></div>
-                    </div>
-                    <div className="relative flex justify-center text-[10px] md:text-xs uppercase">
-                      <span className="bg-[#FFFFFF] px-3 text-brown-light font-black">
-                        أو
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleRandomMatch}
-                      disabled={!isConnected}
-                      className={`flex-1 btn-game btn-primary py-4 md:py-4 text-sm md:text-xl gap-1 md:gap-3 cursor-pointer touch-manipulation ${!isConnected ? "opacity-50 cursor-not-allowed" : ""}`}
+                  </AnimatePresence>
+                    <div className="room-code-bg border-2 border-black p-1.5 md:p-2 flex flex-col items-center justify-center h-full w-full gap-1"
+                    style={{ clipPath: `polygon(0% 0%, 105% -20%, 100% 100%, 0% 100%)` }}
                     >
-                      <div className="flex items-center gap-1.5" dir="ltr">
-                        <span className="large-emoji">🔍</span>
-                      </div>
-                      <span>
-                        {isConnected ? "بحث عشوائي" : "جاري الاتصال..."}
-                      </span>
-                    </button>
 
-                    <div className="flex flex-col box-game p-2 h-16 relative overflow-hidden">
-                      {getLevel(xp) < 50 && (
-                        <div className="absolute inset-0 bg-gray-200/80 backdrop-blur-[1px] z-10 flex flex-col items-center justify-center">
-                          <Lock className="w-4 h-4 text-gray-600 mb-0.5" />
-                          <span
-                            className="text-[11px] font-black text-gray-700"
-                            dir="ltr"
+                        <label className="flex items-center justify-center text-white text-[14px] md:text-[16px] font-black mb-1 md:mb-2">
+                          <span className="home-title-stroke-sm">إنشاء كود غرفة</span>
+                        </label>
+                        <div className="flex w-full flex-col gap-2">
+                          <input
+                            type="text"
+                            value={roomId}
+                            onChange={(e) => {
+                              // Normalize Arabic numbers to English
+                              const val = e.target.value.replace(/[٠-٩]/g, (d) =>
+                                "٠١٢٣٤٥٦٧٨٩".indexOf(d).toString(),
+                              );
+                              setRoomId(val);
+                            }}
+                            placeholder="أكتب كود الغرفة هنا..."
+                            className="border-2 border-black bg-white shadow-sm font-black text-[10px] md:text-sm p-2 h-12 flex-1"
+                            maxLength={6}
+                            dir="rtl"
+                          />
+                          <button
+                            onClick={handleJoin}
+                            disabled={!isReadyToPlay || isJoiningRoom}
+                            className={`bg-[#00FFFF] border-2 border-black shadow-sm font-black h-14 md:h-16 px-4 md:px-6 py-2 md:py-3 text-base md:text-lg cursor-pointer touch-manipulation ${(!isReadyToPlay || isJoiningRoom) ? "text-xs md:text-sm h-14 md:h-16 opacity-50 cursor-not-allowed" : ""}`}
                           >
+                            {!isReadyToPlay ? "جاري الاتصال..." : isJoiningRoom ? "جاري الدخول..." : "دخول"}
+                          </button>
+                        </div>
+                    </div>
+
+                    <div className="absolute inset-0 pointer-events-none flex w-full items-center justify-center text-center z-50">
+                      <div className="flex or-bg-2 items-center justify-center text-center text-[10px] md:text-xs uppercase">
+                        <span className="or-bg px-1 text-black font-black">
+                          أو
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="random-bg border-2 border-black p-1.5 md:p-2 flex flex-col items-center justify-center h-full w-full gap-1"
+                    style={{ clipPath: 'polygon(0% 0%, 100% 0%, 100% 100%, -5% 120%)' }}
+                    >
+                      <label className="flex items-center justify-center text-[14px] md:text-[16px] text-white font-black mb-1 md:mb-2">
+                          <span className="home-title-stroke-sm">لعب عشوائي</span>
+                      </label>
+                      <button
+                        onClick={handleRandomMatch}
+                        disabled={!isReadyToPlay}
+                        className={`flex bg-yellow-400 border-2 border-black shadow-sm font-black text-black p-0.5 md:p-1 gap-1 text-sm md:text-lg w-full h-12 md:h-14 items-center justify-center cursor-pointer touch-manipulation  ${!isReadyToPlay ? "text-xs md:text-sm h-12 md:h-14 opacity-50 cursor-not-allowed" : ""}`} dir="rtl"
+                      >
+                        <div className="flex items-center gap-1.5" dir="ltr">
+                          <span className="large-emoji">🔍</span>
+                        </div>
+                        <span>
+                          {isReadyToPlay ? "ابدأ البحث" : "جاري الاتصال..."}
+                        </span>
+                      </button>
+
+                      <div className="flex flex-col bg-white border-2 border-black shadow-sm p-1 md:p-2 h-15 md:h-16 w-full relative overflow-hidden">
+                        {getLevel(xp) < 50 && (
+                          <div className="absolute inset-0 bg-gray-200/80 backdrop-blur-[1px] z-10 flex flex-col items-center justify-center">
+                            <Lock className="w-4 h-4 text-gray-600 mb-0.5" />
+                            <span
+                              className="text-[11px] font-black text-gray-700"
+                              dir="ltr"
+                            >
+                              Lvl 50+
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-3 flex-1">
+                          <input
+                            type="checkbox"
+                            id="useToken"
+                            checked={useToken && getLevel(xp) >= 50}
+                            onChange={(e) =>
+                              getLevel(xp) >= 50 && setUseToken(e.target.checked)
+                            }
+                            disabled={tokens <= 0 || getLevel(xp) < 50}
+                            className="checkbox-game disabled:opacity-50"
+                          />
+                          <label
+                            htmlFor="useToken"
+                            className={`cursor-pointer select-none flex items-center gap-1 ${getLevel(xp) < 50 ? "pointer-events-none" : ""}`}
+                          >
+                            <button
+                              onClick={toggleTokenInfo}
+                              className="font-black text-accent-purple hover:underline text-sm truncate"
+                            >
+                              تخمينة
+                            </button>
+                            <span className="font-black text-main text-sm">
+                              ({tokens})
+                            </span>
+                          </label>
+                        </div>
+                        <div className="border-t border-game mt-1 mb-0.5"></div>
+                        <div className="w-full items-center justify-between flex text-left" dir="ltr">
+                          <span className="font-bold text-xs md:text-sm">
                             Lvl 50+
                           </span>
-                        </div>
-                      )}
-                      <div className="flex items-center gap-6 flex-1">
-                        <input
-                          type="checkbox"
-                          id="useToken"
-                          checked={useToken && getLevel(xp) >= 50}
-                          onChange={(e) =>
-                            getLevel(xp) >= 50 && setUseToken(e.target.checked)
-                          }
-                          disabled={tokens <= 0 || getLevel(xp) < 50}
-                          className="checkbox-game disabled:opacity-50"
-                        />
-                        <label
-                          htmlFor="useToken"
-                          className={`cursor-pointer select-none flex items-center gap-1 ${getLevel(xp) < 50 ? "pointer-events-none" : ""}`}
-                        >
-                          <button
-                            onClick={toggleTokenInfo}
-                            className="font-black text-accent-purple hover:underline text-sm truncate"
-                          >
-                            تخمينة
-                          </button>
-                          <span className="font-black text-main text-sm">
-                            ({tokens})
+                          <span className="flex text-xs md:text-sm text-gray-400 px-1">
+                            |
                           </span>
-                        </label>
+                          <span className="font-bold text-xs md:text-sm">
+                            1=500xp
+                          </span>
+                        </div>
                       </div>
-                      <div className="border-t border-game mt-1 mb-0.5"></div>
-                      <div className="w-full flex text-left" dir="ltr">
-                        <span className="font-bold text-xs md:text-sm">
-                          Lvl 50+
-                        </span>
-                        <span className="flex text-xs md:text-sm text-gray-400 px-1">
-                          |
-                        </span>
-                        <span className="font-bold text-xs md:text-sm">
-                          1=500xp
-                        </span>
-                      </div>
-                    </div>
                   </div>
-                </div>
+              </div>
+
               </div>
             </div>
+
+        {!playerSerial && (
+            <div
+              id="seo-platform-description"
+              className="mt-4 bg-white/90 border-2 border-black p-4 text-right rounded-2xl shadow-md text-gray-800 space-y-2.5 leading-relaxed font-cairo"
+              dir="rtl"
+            >
+              {/* تم تحويلها إلى h2 لترتيب أفضل للـ SEO */}
+              <h2 className="text-base md:text-lg font-black text-main">
+                مرحباً بك في منصة خمن تخمينة - وجهتك الأولى للألعاب الجماعية والتنافسية أونلاين لشخصين أو أكثر!
+              </h2>
+              <p className="text-xs md:text-sm font-bold text-gray-700">
+                تحولت خمن تخمينة من لعبة واحدة إلى منصة متكاملة تضم أكثر من 13 لعبة ذكاء وسرعة، مع تحديثات مستمرة وإضافة ألعاب جديدة دورياً.
+              </p>
+              <p className="text-xs md:text-sm font-bold text-gray-700">
+                استمتع بتشكيلة واسعة من التحديات التفاعلية التي تناسب جميع الأذواق:
+              </p>
+              <ul className="text-xs md:text-sm font-bold text-gray-700 space-y-1.5 list-disc list-inside pr-1">
+                <li>
+                  <strong className="font-black text-black">ألعاب الذكاء والكلمات أونلاين:</strong> تخمينة كلمة لي (Wordle)، تخمينة بازل (Puzzle)، وتخمينة إي كيو (IQ).
+                </li>
+                <li>
+                  <strong className="font-black text-black">ألعاب التخمين والصور الجماعية:</strong> تخمين الصور (مع ميزة رفع صورك الخاصة)، وسباق التخمين السريع.
+                </li>
+                <li>
+                  <strong className="font-black text-black">ألعاب التنافس الكلاسيكية والسرعة:</strong> أتوبيس كومبليت، تخمينة أربع حروف (Connect Four)، نقطة وخط (Dots and Boxes)، تخمينة إكس أو (XO)، وأكواب السرعة.
+                </li>
+                <li>
+                  <strong className="font-black text-black">ألعاب الحماس والإثارة أونلاين:</strong> حرب الفضاء، قنبلة التخمين، وتخمينة كف يد.
+                </li>
+              </ul>
+              <p className="text-xs md:text-sm font-black text-accent-blue pt-1">
+                العب الآن مع أصدقائك واستخدم الكروت المساعدة والمؤثرات التفاعلية لتجربة ألعاب جماعية لا تُنسى!
+              </p>
+            </div>
+            )}
           </motion.div>
         </div>
 
@@ -21975,17 +24314,14 @@ export default function App() {
                 exit={{ scale: 0.9, y: 20 }}
                 className="bg-modal-theme rounded-[2rem] w-full max-w-md overflow-hidden shadow-2xl relative flex flex-col max-h-[85vh]"
               >
-                <div className="bg-orange-500 p-6 text-center relative shrink-0 border-b-4 border-black">
+                <div className="bg-orange-500 p-3 text-center relative shrink-0 border-b-4 border-black">
                   <button
                     onClick={handleOpenshowLeaderboardModal}
-                    className="absolute top-4 right-4 w-8 h-8 bg-white/20 hover:bg-white/30 rounded-full flex items-center justify-center text-white transition-colors"
+                    className="absolute top-1 right-1 w-8 h-8 bg-white/20 hover:bg-white/30 rounded-full flex items-center justify-center text-white transition-colors"
                   >
                     <X className="w-5 h-5" />
                   </button>
-                  <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-lg border-2 border-yellow-400">
-                    <Trophy className="w-8 h-8 text-yellow-500" />
-                  </div>
-                  <h2 className="text-2xl font-black text-white mb-1">
+                  <h2 className="text-xl font-black text-white mb-1">
                     أبطال التخمين (Top 100)
                   </h2>
                   <p className="text-white/80 text-sm font-bold">
@@ -21994,7 +24330,7 @@ export default function App() {
                 </div>
 
                 <div
-                  className="overflow-y-auto flex-1 bg-gray-50"
+                  className="overflow-y-auto no-scrollbar flex-1 bg-gray-50"
                   dir="rtl"
                   onScroll={handleLeaderboardScroll}
                 >
@@ -22003,67 +24339,261 @@ export default function App() {
                     {sortedTopPlayers.findIndex(
                       (p) => p.serial === playerSerial,
                     ) !== -1 && (
-                      <div className="px-4 pb-3 pt-3 bg-gray-50">
-                      <div className="bg-purple-600 text-white p-3 rounded-none flex items-center gap-3 border-x-4 border-b-4 border-black shadow-[4px_4px_0px_0px_rgba(0,0,0,1)]">
-                        <div className="font-black text-xl w-8 text-center bg-white/20 rounded-lg py-1">
-                          #
-                          {sortedTopPlayers.findIndex(
-                            (p) => p.serial === playerSerial,
-                          ) + 1}
-                        </div>
-                        <div className="relative w-10 h-10">
-                          {renderAvatarContent(
-                            avatar,
-                            getLevel(xp),
-                            true,
-                            true,
-                            selectedFrame,
-                            playerSerial,
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0 text-right">
-                          <div className="font-black truncate">
-                            أنت ({playerName})
+                      <div className="px-2 pb-2 pt-2 bg-gray-300">
+                        <div className="bg-orange-500 text-white p-2 rounded-none flex items-center gap-1 border-x-4 border-b-4 border-black">
+                          <div className="font-black text-xl w-8 text-center bg-white/20 rounded-lg py-1">
+                            #
+                            {sortedTopPlayers.findIndex(
+                              (p) => p.serial === playerSerial,
+                            ) + 1}
                           </div>
-                          <div className="text-xs text-white/80 font-bold flex items-center gap-2">
-                            <span dir="ltr">Lvl {getLevel(xp)}</span>
-                            <span>•</span>
-                            <span>{wins} فوز</span>
-                            <span>•</span>
-                            <span>{streak} 🔥</span>
-                            <span>•</span>
-                            <span>{likes} ❤️</span>
+                          <div className="relative w-10 h-10">
+                            {renderAvatarContent(
+                              avatar,
+                              getLevel(xp),
+                              true,
+                              true,
+                              selectedFrame,
+                              playerSerial,
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0 text-right">
+                            <div className="font-black truncate">
+                              أنت ({playerName})
+                            </div>
+                            <div className="text-[10px] md:text-xs text-brown-muted font-bold flex flex-wrap items-center justify-center gap-1 md:gap-1">
+                              <span dir="ltr">Lvl {limit99(getLevel(xp))}</span>
+                              <span>•</span>
+                              <span>{limit99(wins)} 🏆</span>
+                              <span>•</span>
+                              <span>{limit99(streak)} 🔥</span>
+                              <span>•</span>
+                              <span>{limit99(likes)} ❤️</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.busCompleteWins || 0)} 🚌</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.xoWins || 0)} <span><span className="text-red-500">X</span><span className="text-green-600">O</span></span></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.handWins || 0)} 🖐</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.iqWins || 0)} <span className="font-black"><span className="text-blue-500">I</span><span className="text-purple-600">Q</span></span></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.dotsWins || 0)} <img src="/dots-and-boxes-logo.png" className="w-3 h-3 inline object-contain" /></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.speedCupsWins || 0)} <img src="/speed-cups/speed-cups-logo.png" className="w-3 h-3 inline object-contain" /></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.bombPartyWins || 0)} 💣</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.wordleWins || 0)} <img src="/word-le-logo.png" className="w-3 h-3 inline object-contain" /></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.connectFourWordsWins || 0)} <img src="/connect-4-logo.png" className="w-3 h-3 inline object-contain" /></span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.spaceWarWins || 0)} 🚀</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.puzzleWins || 0)} 🧩</span>
+                              <span>•</span>
+                              <span>{limit99(sortedTopPlayers.find(p => p.serial === playerSerial)?.beachRaceWins || 0)} 🐇</span>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    )}
 
                     <div
-                      className="flex items-center justify-center gap-2 py-3 px-2 bg-gray-100"
+                      className="flex flex-col gap-0.5 md:gap-1.5 py-1 px-0.5 md:py-2 md:px-2 bg-gray-200 border-b border-gray-300"
                       dir="rtl"
                     >
-                      {[
-                        { id: "all", icon: "👥" },
-                        { id: "level", icon: "⭐" },
-                        { id: "wins", icon: "🏆" },
-                        { id: "streak", icon: "🔥" },
-                        { id: "likes", icon: "❤️" },
-                      ].map((filter) => (
-                        <button
-                          key={filter.id}
-                          onClick={() => setLeaderboardFilter(filter.id as any)}
-                          className={`flex-1 max-w-[4rem] h-11 flex items-center justify-center rounded-xl font-black text-xl transition-all border-b-4 ${
-                            leaderboardFilter === filter.id
-                              ? "bg-orange-500 text-white border-orange-600 shadow-sm -translate-y-1"
-                              : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
-                          }`}
-                        >
-                          {filter.icon}
-                        </button>
-                      ))}
+                      {/* Row 1: General Stats & Classic Categories */}
+                      <div className="flex items-center justify-center gap-0.5 sm:gap-1.5 flex-wrap">
+                        {[
+                          { id: "all", icon: "👥", title: "الكل" },
+                          { id: "wins", icon: "🏆", title: "إجمالي الفوز" },
+                          { id: "streak", icon: "🔥", title: "الانتصارات المتتالية" },
+                          { id: "likes", icon: "❤️", title: "الإعجابات" },
+                          { id: "busComplete", icon: "🚌", title: "حافلة الكلمات" },
+                          { id: "xo", icon: <span><span className="text-red-500">X</span><span className="text-green-600">O</span></span>, title: "XO" },
+                          { id: "hand", icon: "🖐", title: "يد واحدة" },
+                          { id: "iq", icon: <span className="font-black"><span className="text-blue-500">I</span><span className="text-purple-600">Q</span></span>, title: "اختبار الذكاء" },
+                        ].map((filter) => (
+                          <button
+                            key={filter.id}
+                            onClick={() => setLeaderboardFilter(filter.id as any)}
+                            title={filter.title}
+                            className={`w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-xl font-black text-lg sm:text-xl transition-all border-b-4 shrink-0 ${
+                              leaderboardFilter === filter.id
+                                ? "bg-orange-500 text-white border-orange-600 shadow-sm -translate-y-0.5"
+                                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                            }`}
+                          >
+                            {filter.icon}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Row 2: Specialized Games */}
+                      <div className="flex items-center justify-center gap-1 sm:gap-1.5 flex-wrap">
+                        {[
+                          { id: "dots", icon: <img src="/dots-and-boxes-logo.png" className="w-5 h-5 sm:w-6 sm:h-6 object-contain" />, title: "سياج الكلمات" },
+                          { id: "speedCups", icon: <img src="/speed-cups/speed-cups-logo.png" className="w-5 h-5 sm:w-6 sm:h-6 object-contain" />, title: "أكواب السرعة" },
+                          { id: "bombParty", icon: "💣", title: "قنبلة الحروف" },
+                          { id: "wordle", icon: <img src="/word-le-logo.png" className="w-5 h-5 sm:w-6 sm:h-6 object-contain" />, title: "تخمينة الكلمات" },
+                          { id: "connectFourWords", icon: <img src="/connect-4-logo.png" className="w-5 h-5 sm:w-6 sm:h-6 object-contain" />, title: "تخمينة 4 حروف" },
+                          { id: "spaceWar", icon: "🚀", title: "حرب الفضاء" },
+                          { id: "puzzle", icon: "🧩", title: "تخمينة puzzle" },
+                          { id: "beachRace", icon: "🐇", title: "سباق التخمين" },
+                        ].map((filter) => (
+                          <button
+                            key={filter.id}
+                            onClick={() => setLeaderboardFilter(filter.id as any)}
+                            title={filter.title}
+                            className={`w-9 h-9 sm:w-10 sm:h-10 flex items-center justify-center rounded-xl font-black text-lg sm:text-xl transition-all border-b-4 shrink-0 ${
+                              leaderboardFilter === filter.id
+                                ? "bg-orange-500 text-white border-orange-600 shadow-sm -translate-y-0.5"
+                                : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                            }`}
+                          >
+                            {filter.icon}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
+
+                    {/* Top Players Special Categories Banner (Not Top 3) */}
+                    {(() => {
+                      const topSerials = topPlayers
+                        .slice(0, 3)
+                        .map((p) => p.serial);
+                      const specialPlayers = new Map<
+                        string,
+                        {
+                          player: any;
+                          categories: {
+                            label: string;
+                            displayVal: string | number;
+                            icon: string;
+                          }[];
+                        }
+                      >();
+
+                      const addSpecialPlayer = (
+                        players: any[] | undefined,
+                        val: number,
+                        label: string,
+                        icon: string,
+                        valueFormatter: (v: number, p: any) => string | number,
+                      ) => {
+                        if (players && players.length > 0 && val > 0) {
+                          const p = players.find(
+                            (p) => !topSerials.includes(p.serial) && !p.isAdmin,
+                          );
+                          if (p) {
+                            if (!specialPlayers.has(p.serial)) {
+                              specialPlayers.set(p.serial, {
+                                player: p,
+                                categories: [],
+                              });
+                            }
+                            const pData = specialPlayers.get(p.serial)!;
+                            pData.categories.push({
+                              label,
+                              displayVal: valueFormatter(val, p),
+                              icon,
+                            });
+                          }
+                        }
+                      };
+
+                      addSpecialPlayer(
+                        highestLevelPlayers,
+                        highestLevelValue,
+                        "الأعلي مستوى",
+                        "⭐",
+                        (val, p) => limit99(getLevel(p.xp)),
+                      );
+                      addSpecialPlayer(
+                        highestStreakPlayers,
+                        highestStreakValue,
+                        "فوز متتالي",
+                        "🔥",
+                        (val, p) => limit99(p.streak || val),
+                      );
+                      addSpecialPlayer(
+                        highestLikesPlayers,
+                        highestLikesValue,
+                        "الأكثر قلوب",
+                        "❤️",
+                        (val, p) => limit99(p.likes || val),
+                      );
+
+                      const specialList = Array.from(specialPlayers.values());
+
+                      if (specialList.length === 0) return null;
+
+                      return (
+                        <div
+                          className={`mt-2 mb-0.5 md:mb-2 px-2 grid gap-0.5 md:gap-1.5 ${specialList.length === 1 ? "grid-cols-1" : specialList.length === 2 ? "grid-cols-1" : "grid-cols-1"}`}
+                        >
+                          {specialList.map(({ player, categories }, idx) => (
+                            <div
+                              key={player.serial || player.name || `special-${idx}`}
+                              className="bg-gradient-to-br from-amber-500/10 to-orange-500/10 rounded-xl p-1.5 md:p-2 flex flex-1 items-center gap-1.5 cursor-pointer hover:from-amber-500/20 hover:to-orange-500/20 transition-all border border-amber-500/20"
+                              onClick={() => openPlayerProfile(player.serial)}
+                            >
+                              <div
+                                className={`flex ${categories.length > 1 ? "gap-1 bg-black/5" : "gap-0.5 bg-black/5"} w-full items-center text-center flex-1`}
+                              >
+                                {categories.map((c, i) => (
+                                  <div
+                                    key={i}
+                                    className={`flex flex-col items-center w-full ${categories.length > 1 ? "bg-black/5 rounded-md py-0.5" : ""}`}
+                                  >
+                                    <span
+                                      className={`font-black text-main w-full text-center truncate px-0.5 shrink-0 ${specialList.length === 3 ? "text-[8px] md:text-xs" : "text-[10px] md:text-xs"}`} dir="ltr"
+                                    >
+                                      {truncateName(player.name)}
+                                    </span>
+                                    <span
+                                      className={`font-bold md:font-black text-orange-600/80 leading-tight ${specialList.length === 3 ? "text-[7px] md:text-[9px]" : "text-[8px] md:text-[9px]"}`}
+                                    >
+                                      {c.label}
+                                    </span>
+                                    <span
+                                      className={`font-black text-main flex items-center gap-0.5 justify-center mt-0.5 ${specialList.length === 3 ? "text-[10px] md:text-sm" : "text-xs md:text-sm"}`}
+                                    >
+                                      {c.displayVal}{" "}
+                                      <span
+                                        className={
+                                          specialList.length === 3
+                                            ? "text-[9px]"
+                                            : "text-xs md:text-sm"
+                                        }
+                                      >
+                                        {c.icon}
+                                      </span>
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+
+                              <div
+                                className={`relative flex items-center justify-center shrink-0 ${specialList.length === 3 ? "w-8 h-8 md:w-11 md:h-11 mt-1" : "w-10 h-10 md:w-12 md:h-12 mt-1"}`}
+                              >
+                                {renderAvatarContent(
+                                  player.avatar,
+                                  getLevel(player.xp),
+                                  false,
+                                  player.isOnline,
+                                  player.selectedFrame,
+                                  player.serial,
+                                )}
+                              </div>
+
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
 
                   {/* List of Players */}
                   <div className="p-2 space-y-2">
@@ -22073,7 +24603,7 @@ export default function App() {
                         const isMe = player.serial === playerSerial;
                         return (
                           <div
-                            key={player.serial}
+                            key={player.serial || player.name || `leaderboard-${index}`}
                             onClick={() => openPlayerProfile(player.serial)}
                             className={`
                           flex items-center gap-2 p-1 md:p-0.5 pt-2 py-2 rounded-xl border-2 transition-transform cursor-pointer hover:scale-[1.02]
@@ -22114,30 +24644,87 @@ export default function App() {
                               >
                                 {player.name} {isMe && "(أنت)"}
                               </div>
-                              <div className="text-xs text-brown-muted font-bold flex items-center gap-0.5 md:gap-2">
+                              <div className="text-[10px] md:text-xs text-brown-muted font-bold flex flex-wrap items-center justify-center gap-1 md:gap-1.5">
                                 <span
                                   className="bg-gray-100 md:px-1.5 rounded text-brown-muted"
                                   dir="ltr"
                                 >
-                                  Lvl {getLevel(player.xp || 0)}
+                                  Lvl {limit99(getLevel(player.xp || 0))}
                                 </span>
-                                <span className="text-brown-light">•</span>
                                 <span className="text-green-600">
-                                  {player.wins} فوز
+                                  {limit99(player.wins || 0)} فوز
                                 </span>
-                                <span className="text-brown-light">•</span>
                                 <span
                                   className="bg-gray-100 md:px-1.5 rounded text-brown-muted"
                                   dir="rtl"
                                 >
-                                  {player.streak || 0} 🔥
+                                  {limit99(player.streak || 0)} 🔥
                                 </span>
-                                <span className="text-brown-light">•</span>
                                 <span
                                   className="bg-red-50 text-red-600 md:px-1.5 rounded"
                                   dir="rtl"
                                 >
-                                  {player.likes || 0} ❤️
+                                  {limit99(player.likes || 0)} ❤️
+                                </span>
+                                <span
+                                  className="bg-blue-50 text-blue-600 md:px-1.5 rounded"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.busCompleteWins || 0)} 🚌
+                                </span>
+                                <span
+                                  className="bg-indigo-50 text-indigo-600 md:px-1.5 rounded"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.xoWins || 0)} <span><span className="text-red-500">X</span><span className="text-green-600">O</span></span>
+                                </span>
+                                <span
+                                  className="bg-indigo-50 text-indigo-600 md:px-1.5 rounded"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.handWins || 0)} 🖐
+                                </span>
+                                <span
+                                  className="bg-indigo-50 text-indigo-600 md:px-1.5 rounded"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.iqWins || 0)} <span className="font-black"><span className="text-blue-500">I</span><span className="text-purple-600">Q</span></span>
+                                </span>
+                                <span
+                                  className="bg-purple-50 text-purple-600 md:px-1.5 rounded flex items-center gap-0.5"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.dotsWins || 0)} <img src="/dots-and-boxes-logo.png" className="w-3 h-3 object-contain" />
+                                </span>
+                                <span
+                                  className="bg-pink-50 text-pink-600 md:px-1.5 rounded flex items-center gap-0.5"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.speedCupsWins || 0)} <img src="/speed-cups/speed-cups-logo.png" className="w-3 h-3 object-contain" />
+                                </span>
+                                <span
+                                  className="bg-red-50 text-red-600 md:px-1.5 rounded flex items-center gap-0.5"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.bombPartyWins || 0)} 💣
+                                </span>
+                                <span
+                                  className="bg-emerald-50 text-emerald-600 md:px-1.5 rounded flex items-center gap-0.5"
+                                  dir="rtl"
+                                >
+                                  {limit99(player.wordleWins || 0)} <img src="/word-le-logo.png" className="w-3 h-3 object-contain" />
+                                </span>
+                                <span className="bg-blue-50 text-blue-600 md:px-1.5 rounded flex items-center gap-0.5" dir="rtl">
+                                  {limit99(player.connectFourWordsWins || 0)} <img src="/connect-4-logo.png" className="w-3 h-3 object-contain" />
+                                </span>
+                                <span className="bg-indigo-50 text-indigo-600 md:px-1.5 rounded flex items-center gap-0.5" dir="rtl">
+                                  {limit99(player.spaceWarWins || 0)} 🚀
+                                </span>
+                                <span className="bg-amber-50 text-amber-600 md:px-1.5 rounded flex items-center gap-0.5" dir="rtl">
+                                  {limit99(player.puzzleWins || 0)} 🧩
+                                </span>
+                                <span className="bg-amber-50 text-amber-600 md:px-1.5 rounded flex items-center gap-0.5" dir="rtl">
+                                  {limit99(player.beachRaceWins || 0)} 🐇
                                 </span>
                               </div>
                             </div>
@@ -22358,6 +24945,248 @@ export default function App() {
     );
   }
 
+  const renderHandGame = () => {
+    if (!room || (room.gameState !== "hand_playing" && room.gameState !== "hand_finished")) return null;
+
+    if (room.gameState === "hand_finished") {
+      return (
+        <div className="w-full flex flex-col items-center justify-center p-2">
+          <h2 className="text-2xl font-black mb-4">انتهت اللعبة!</h2>
+          <div className="flex gap-4 font-black text-xl mb-4">
+            <span className="text-red-500">{room.players[0]?.name || "لاعب 1"}: {room.handP1Score}</span>
+            <span className="text-green-500">{room.players[1]?.name || "لاعب 2"}: {room.handP2Score}</span>
+          </div>
+          <div className="text-3xl font-black mb-6">
+            {room.handWinner === "draw" ? "تعادل!" : 
+             room.handWinner === socket?.id ? "🏆 لقد فزت!" : 
+             "😢 خسرت!"}
+          </div>
+          <GameEndControls
+            room={room}
+            socket={socket}
+            myId={socket?.id}
+            playerSerial={playerSerial}
+            onRematch={() => {
+              socket?.emit("request_hand_rematch", { roomId: room.id });
+              GameEngineService.handleAction("request_hand_rematch", { roomId: room.id, playerId: socket?.id });
+            }}
+            onLeaveGame={handleLeaveGame}
+            playSound={playSound}
+          />
+        </div>
+      );
+    }
+
+    const myId = room.players[0]?.id || socket?.id;
+    const isPicker = room.handPickerId === socket?.id || room.handPickerId === myId;
+    const isSearcher = room.handSearcherId === socket?.id || room.handSearcherId === myId;
+    
+    // Hand view
+    if (room.handPhase === "picking" || (isSearcher && room.handPhase === "searching")) {
+      const isWaitingSearcher = room.handPhase === "picking" && isSearcher;
+      return (
+        <div className="w-full flex flex-col hand-bg items-center justify-center p-2 pt-0.5">
+          <h2 className="text-sm md:text-base font-black mb-1 text-pink-600 border-2 border-pink-200 bg-pink-50 px-4 py-0.5 rounded-xl shadow-sm text-center">
+            {room.handPhase === "picking" 
+              ? (isPicker ? `اختار رقم للمنافس يبحث عنه 🧐 (${room.timer || 0}ث)` : `انتظر قليلاً! المنافس يختار رقم... ⏳ (${room.timer || 0}ث)`) 
+              : "ابحث عن الرقم واضغط على الجرس! 🔔"}
+          </h2>
+          <div 
+            className="relative w-[85vw] max-w-[360px] mx-auto z-10"
+            style={{ aspectRatio: "229.4/317.85" }}
+          >
+          {room.handPhase === "searching" && (
+            <div className="absolute text-xl font-black text-red-500 right-3 animate-pulse">
+              الرقم: {room.handTargetNumber}
+            </div>
+          )}
+            {/* Custom High-Quality Hand Silhouette SVG Path Outline from public/hand.svg */}
+            <svg 
+              viewBox="0 0 229.4 317.85" 
+              className="absolute pointer-events-none z-0"
+              style={{
+                left: "1.5%",
+                top: "2%",
+                width: "100%",
+                height: "100%",
+              }}
+            >
+              <path
+                d="m226.59,146.53c-9.24,38.1-27.97,72-37.95,108.82-9.39,21.37-24.28,39.8-29.55,62.51-4.35-4.32,2.55-18.98,6.11-25.27,5.62-14.05,17.01-25.79,21.38-40.59,4.25-21.7,14.01-40.92,22.4-61.06,4.14-10.16,8.26-21.76,10.1-29.83,1.68-7.36,7.34-17.7,7.37-26.08.03-7.09-7.16-11.99-13.87-9.7-20.09,6.85-23.26,37.11-36.07,52.93-23.85,19,.34-59.51.34-68.73,3.87-18.09,5.8-24.5,9.16-42.69,3.53-8.48,3.06-44.16-6.79-45.57-21.77-3.13-28.07,71.56-32.11,85.75-2.68,9.43-2.57,34.46-11.87,34.68-7.31.17-6.76-19.53-7.85-28.18.02-25.44,2.43-47.13,1.83-72.6-1.8-10.18-.5-32.93-11.86-36.93-8.3-2.92-11.2-1.06-13.81,2.51s-4.21,7.45-5.07,11.64c-8.86,43.38,7.1,130.79-7.98,131.71-12.93.79-14.58-40.62-16.43-54s-5.59-33.02-9.07-50.66c-4.24-10.81-6.27-28.9-21.49-18.7-21.96,16.2,29.05,149.94,4.28,135.07-13.01-16.67-20.21-42.39-31.4-60.87-2.66-4.81-6.71-3.39-9.83-.7-2.43,2.1-3.76,5.2-3.7,8.41.37,21.95,15.83,44.79,19.73,67.04,6.66,21.2,12.33,42.72,17,64.49,3.07,14.29,7.92,28.13,14.17,41.34,4.26,9.01,7.69,18.18,7.23,25.58-13.9-27.72-23.43-56.3-30.32-86.68-4.41-24.48-19.31-71.49-19.31-71.49,0,0-13.95-28.34-10.96-43.68,13.67-32.5,29.79,19.45,35.78,31.61,25.59,55.01,13.52-3.66,7.58-25.43-1.57-21.86-22.76-88.42,6.95-89.71,17.93-.78,21.21,50.22,24.78,67.65,2.97,14.51,3.45,49.34,13.46,57.62,1.28,1.06,3.19.41,3.58-1.2C99.76,115.67,75.8-3.9,114.23.1c25.48,2.65,16.8,78.94,17.13,102.16.12,8.92-3.01,27.26,2.26,34.11,1.51,1.97,4.66,1.2,5.28-1.2,8.47-32.58,8.67-70.53,23.34-101.94,21.78-36.76,31.14,3.16,26.85,31.59-4.01,26.62-32.69,132.19-14,110.32,12.86-15.04,13.37-38.03,29.57-49.38,17.77-10.82,30.66,2.1,21.93,20.77Z"
+                stroke="black"
+                strokeWidth="1"
+                fill="black"
+              />
+            </svg>
+            
+            {room.handNumbers?.map((n: any, idx: number) => {
+              const isSelected = room.handSearcherSelected === n.val;
+              const px = parseFloat(n.left) / 100;
+              const py = parseFloat(n.top) / 100;
+              // Map numbers within hand box for inner padding and spacing
+              const leftPos = `${7.5 + px * 85}%`;
+              const topPos = `${7.5 + py * 85}%`;
+              const isPickerPicking = room.handPhase === "picking" && isPicker;
+              const isLocalSelected = isPickerPicking && handPickerLocalSelected === n.val;
+              return (
+                <button
+                  key={idx}
+                  disabled={isWaitingSearcher}
+                  className={`absolute font-black transition-all duration-200 z-10 flex items-center justify-center 
+                    ${isPickerPicking 
+                      ? (isLocalSelected ? 'text-pink-600 scale-125 font-extrabold drop-shadow bg-pink-100 rounded-full' : 'text-red-600 hover:text-red-500 hover:scale-115') 
+                      : isSelected ? 'text-pink-600 scale-125 font-extrabold drop-shadow' : 'text-gray-800 hover:text-pink-600'} 
+                    ${isWaitingSearcher ? 'opacity-40 cursor-default hover:text-gray-800 pointer-events-none' : ''}`}
+                  style={{
+                    left: leftPos,
+                    top: topPos,
+                    fontSize: n.fontSize,
+                    transform: `translate(-50%, -50%) rotate(${n.rotate})`,
+                    padding: isLocalSelected ? '0.2em 0.3em' : '0',
+                  }}
+                  onClick={() => {
+                    if (isWaitingSearcher) return;
+                    if (room.handPhase === "picking") {
+                      playSound("clickOpen");
+                      setHandPickerLocalSelected(n.val);
+                    } else if (room.handPhase === "searching") {
+                      socket?.emit("hand_select_number", { roomId: room.id, number: n.val });
+                      GameEngineService.handleAction("hand_select_number", { roomId: room.id, number: n.val, playerId: socket?.id });
+                    }
+                  }}
+                >
+                  {n.val}
+                </button>
+              );
+            })}
+          </div>
+          {room.handPhase === "picking" && isPicker && (
+            <div className="flex flex-col items-center mt-2 mb-4">
+              <button
+                disabled={handPickerLocalSelected === null}
+                onClick={() => {
+                  if (handPickerLocalSelected !== null) {
+                    playSound("clickClose");
+                    socket?.emit("hand_pick_number", { roomId: room.id, number: handPickerLocalSelected });
+                    GameEngineService.handleAction("hand_pick_number", { roomId: room.id, number: handPickerLocalSelected, playerId: socket?.id });
+                  }
+                }}
+                className={`px-6 py-3 rounded-2xl font-black text-lg md:text-xl shadow-[0_4px_0_0_rgba(0,0,0,0.1)] transition-all flex flex-col items-center leading-tight
+                  ${handPickerLocalSelected !== null 
+                    ? "bg-green-500 hover:bg-green-600 text-white active:translate-y-[4px] active:shadow-none" 
+                    : "bg-gray-300 text-gray-500 cursor-not-allowed shadow-none"}`}
+              >
+                <span className="flex gap-3" dir="rtl">
+                  تأكيد إرسال الرقم
+                {handPickerLocalSelected !== null && (
+                  <span className="text-xl font-black text-red-600">({handPickerLocalSelected})</span>
+                )}
+                </span>
+              </button>
+            </div>
+          )}
+          {isSearcher && room.handPhase === "searching" && (
+             <button
+               onClick={() => {
+                 socket?.emit("hand_ring_bell", { roomId: room.id });
+                 GameEngineService.handleAction("hand_ring_bell", { roomId: room.id, playerId: socket?.id });
+               }}
+               className={`w-20 h-20 md:w-24 md:h-24 rounded-full border-[6px] shadow-[0_8px_0_0_#991b1b] active:shadow-none active:translate-y-[8px] flex items-center justify-center text-white transition-all ${shakeBell ? "animate-shake" : ""} ${room.handSearcherSelected ? (shakeBell ? 'bg-red-500 border-red-700' : 'bg-red-500 border-red-700 animate-bounce') : 'bg-gray-400 border-gray-600'}`}
+             >
+               <BellRing className="w-8 h-8 md:w-10 md:h-10" />
+             </button>
+          )}
+        </div>
+      );
+    }
+
+    // Grid view (Picker during searching phase)
+    if (isPicker && room.handPhase === "searching") {
+      const p1Id = room.players[0]?.id;
+      const p2Id = room.players[1]?.id;
+      const p1Count = room.handGrid.filter((c: any) => c === p1Id).length;
+      const p2Count = room.handGrid.filter((c: any) => c === p2Id).length;
+      
+      return (
+        <div className="w-full flex flex-col items-center justify-center p-2">
+          <div className="flex justify-between w-full mb-2 px-2 font-black text-lg bg-gray-50 border-2 border-gray-200 rounded-xl py-2">
+            <span className="text-red-500 flex flex-col items-center">
+               <span className="text-xs text-gray-500">{room.players[0]?.name || "لاعب 1"}</span>
+               {p1Count}
+            </span>
+            <span className="text-green-500 flex flex-col items-center">
+               <span className="text-xs text-gray-500">{room.players[1]?.name || "لاعب 2"}</span>
+               {p2Count}
+            </span>
+          </div>
+          <h2 className="text-sm md:text-base font-black mb-2 text-blue-600 animate-pulse border border-blue-200 bg-blue-50 px-3 py-1 rounded-full text-center">
+            المنافس بيبحث... املأ المربعات بسرعة! ✍️
+          </h2>
+          {/* Scrollable grid container keeping current play visual and centering on next action */}
+          <div className="w-full max-w-[360px] max-h-[280px] overflow-y-auto bg-gray-300 p-2 rounded-xl shadow-inner scroll-smooth border border-gray-400/20">
+            <div className="grid grid-cols-5 gap-1 touch-manipulation">
+              {(() => {
+                const nextEmptyIdx = room.handGrid.findIndex((x: any) => x === null);
+                return room.handGrid.map((c: any, idx: number) => {
+                  const isEmpty = c === null;
+                  const isP1 = c === p1Id;
+                  const isP2 = c === p2Id;
+                  // Highlight the next available cell using the cached nextEmptyIdx (O(1) lookup inside loop)
+                  const isNext = isEmpty && nextEmptyIdx === idx;
+                  return (
+                    <button 
+                      key={idx} 
+                      disabled={!isNext}
+                      ref={(el) => {
+                        if (isNext && el && idx !== prevHandNextIdxRef.current) {
+                          prevHandNextIdxRef.current = idx;
+                          // Use auto-scrolling with nearest block to prevent heavy layout-recalculation/animation lag
+                          el.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+                        }
+                      }}
+                      onClick={() => {
+                        if (isNext) {
+                          // Optimistic update for instantaneous feedback on production servers (Railway/GitHub)
+                          if (room && socket) {
+                            const updatedGrid = [...room.handGrid];
+                            const currentEmptyIdx = updatedGrid.findIndex(x => x === null);
+                            if (currentEmptyIdx !== -1) {
+                              updatedGrid[currentEmptyIdx] = socket.id;
+                              
+                              // Play sound immediately on client side for crisp responsive feedback
+                              playSound("handXFill");
+                              
+                              // Cache the count so the subsequent useEffect run doesn't double-play the sound
+                              const newFilledCount = updatedGrid.filter((x: any) => x !== null).length;
+                              prevHandGridCountRef.current = newFilledCount;
+
+                              setRoom({
+                                ...room,
+                                handGrid: updatedGrid
+                              });
+                            }
+                          }
+                          socket?.emit("hand_click_cell", { roomId: room.id });
+                          GameEngineService.handleAction("hand_click_cell", { roomId: room.id, playerId: socket?.id });
+                        }
+                      }}
+                      className={`aspect-square rounded-md flex items-center justify-center font-black text-lg md:text-xl border-2 transition-colors duration-100 ${isEmpty ? (isNext ? 'bg-yellow-100 border-yellow-400 scale-105 shadow-sm active:scale-95 cursor-pointer animate-pulse' : 'bg-white border-gray-100 opacity-60 cursor-default') : 'bg-gray-100 border-gray-300'}`}
+                    >
+                      {isP1 && <span className="text-red-500 drop-shadow-sm">X</span>}
+                      {isP2 && <span className="text-green-500 drop-shadow-sm">X</span>}
+                    </button>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    
+    return null;
+  };
+
   if (!room) {
     if (isSearching) return null; // Handled by isSearching block
     if (!joined) return null; // Handled by !joined block
@@ -22424,9 +25253,7 @@ export default function App() {
 
           {/* Game Info (Center) */}
           <div className="flex-shrink-0 flex items-center gap-1.5 md:gap-2 mx-2">
-            {room.gameState !== "waiting" &&
-              room.gameState !== "custom_image_upload" &&
-              room.gameState !== "starting" && (
+            {(room.gameState === "guessing" || room.gameState === "discussion") && (
                 <div
                   className={`flex items-center justify-center min-w-[70px] md:min-w-[80px] gap-1 md:gap-1.5 px-2 md:px-3 py-1 rounded-full text-sm md:text-base font-black transition-colors border-2 ${room.isFrozen ? "bg-cyan-100 text-cyan-600 border-cyan-200 animate-pulse" : room.timer <= 10 && room.gameState === "guessing" ? "bg-red-100 text-red-600 border-red-200 animate-pulse" : "bg-gray-100 text-brown-muted border-gray-200"}`}
                 >
@@ -22574,10 +25401,11 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <main className="flex-1 relative flex flex-col items-center py-2 px-2 max-w-md mx-auto w-full overflow-hidden">
+        <main className={`flex-1 relative flex flex-col items-center py-2 px-2 mx-auto w-full overflow-hidden ${room?.category === "iq" ? "max-w-md" : "max-w-md"}`}>
           {/* Players Header (VS Mode) */}
-          <div className="w-full flex items-center justify-center gap-3 md:gap-6 py-2 px-4 bg-white/60 backdrop-blur-md rounded-[32px] border-4 border-white shadow-xl mb-4 relative z-50">
-            {/* Player (Me) */}
+          {room?.gameState !== "space_war_playing" && !room?.gameState?.startsWith("puzzle") && !room?.gameState?.startsWith("beach_race_playing") && !room?.gameState?.startsWith("hand_playing") && !room?.gameState?.startsWith("wordle_playing") && !room?.gameState?.startsWith("connect_four_words_playing") && !room?.gameState?.startsWith("bus_complete_playing") && !room?.gameState?.startsWith("bus_complete_evaluating") && !room?.gameState?.startsWith("bus_complete_spin") && (
+            <div className="w-full flex items-center justify-center gap-3 md:gap-6 py-2 px-4 bg-white/60 backdrop-blur-md rounded-[32px] border-4 border-white shadow-xl mb-4 relative z-50">
+              {/* Player (Me) */}
             <div className="flex flex-col items-center relative">
               {me && (
                 <>
@@ -22672,10 +25500,6 @@ export default function App() {
                     className="mt-2 font-black text-[11px] md:text-sm text-main flex items-center gap-2"
                     dir="ltr"
                   >
-                    <div class="flex items-center gap-1.5">
-                      <span class="w-6 h-6 p-1 -m-1" title="empty space"></span>
-                      <span class="w-6 h-6 p-1 -m-1" title="empty space"></span>
-                    </div>
                     <span className="truncate max-w-[60px] md:max-w-[100px]">
                       {opponent.name}
                     </span>
@@ -22760,6 +25584,7 @@ export default function App() {
               )}
             </div>
           </div>
+          )}
 
           {judgmentRequest && (
             <div className="fixed inset-0 z-[5000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
@@ -22817,7 +25642,7 @@ export default function App() {
           {/* Center Content: Image or Waiting UI */}
           <div className="flex-1 flex flex-col items-center justify-center w-full max-w-2xl relative my-0.5 min-h-0">
             {room.gameState === "custom_image_upload" ? (
-              <div className="w-full card-game p-3 md:p-3 text-center space-y-3 md:space-y-5 relative overflow-hidden flex flex-col min-h-[400px]">
+              <div className="w-full card-game p-2 md:p-3 text-center space-y-3 md:space-y-5 relative overflow-hidden flex flex-col min-h-[400px]">
                 <div className="absolute top-0 left-0 w-full h-1 bg-purple-200">
                   <div
                     className="h-full bg-purple-500 transition-all duration-1000"
@@ -22853,6 +25678,9 @@ export default function App() {
                         onClick={() => {
                           playSound("clickOpen");
                           socket?.emit("start_game_custom", {
+                            roomId: room.id,
+                          });
+                          GameEngineService.handleAction("start_game_custom", {
                             roomId: room.id,
                           });
                         }}
@@ -22974,7 +25802,7 @@ export default function App() {
                               <div
                                 className={`leading-tight whitespace-pre-wrap ${msg.senderId === socket?.id ? "text-right" : "text-left"}`}
                               >
-                                {msg.text}
+                                {msg.senderId === socket?.id ? (msg.originalText || msg.text) : msg.text}
                               </div>
                             </div>
                           </div>
@@ -23032,6 +25860,23 @@ export default function App() {
                               typingTimeoutRef.current = null;
                             }, 1500);
                           }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              if (customChatInput.trim() && socket && room) {
+                                playSound("clickOpen");
+                                socket.emit("send_chat", {
+                                  roomId: room.id,
+                                  text: customChatInput,
+                                });
+                                setCustomChatInput("");
+                                if (typingTimeoutRef.current)
+                                  clearTimeout(typingTimeoutRef.current);
+                                socket.emit("stop_typing", { roomId: room.id });
+                                typingTimeoutRef.current = null;
+                              }
+                            }
+                          }}
                           placeholder="اكتب هنا..."
                           className="flex-1 bg-white border border-gray-300 rounded-full px-5 py-3 text-sm focus:outline-none focus:border-purple-400 font-bold shadow-inner"
                         />
@@ -23068,6 +25913,1725 @@ export default function App() {
                   </div>
                 )}
               </div>
+            ) : [
+                "bus_complete_setup",
+                "bus_complete_spin",
+                "bus_complete_playing",
+              ].includes(room.gameState) ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                {renderBusCompleteRewardBar()}
+                {room.players.length === 2 && (
+                  <div className="flex justify-between items-center w-full px-1">
+                    <div
+                      className="flex flex-col items-center bg-white border-2 border-green-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]"
+                      dir="rtl"
+                    >
+                      <span className="text-[10px] font-bold text-gray-400 max-w-[80px] truncate">
+                        {room.players[0]?.name || "لاعب 1"}
+                      </span>
+                      <span className="text-sm font-black text-green-600">
+                        🏆 {room.players[0]?.busCompleteWins || 0}
+                      </span>
+                    </div>
+
+                    {(room.gameState === "bus_complete_playing" ||
+                      room.gameState === "bus_complete_spin") && (
+                      <div
+                        className="flex justify-center items-center gap-1 mx-2 border-2 border-green-200 px-3 py-1 rounded-xl shadow-sm min-w-[70px]"
+                        dir="ltr"
+                      >
+                        <span
+                          className={`text-2xl font-black font-mono tracking-wider ${((room.busCompleteAdViewers?.length || 0) > 0 || (room.adPausedPlayersArray?.length || 0) > 0) || Object.values(room.busCompleteCooldowns || {}).some((c) => (c as number) > 0) ? "text-blue-600 animate-pulse" : room.timer <= 60 ? "text-red-600" : "text-gray-700"}`}
+                        >
+                          {Math.floor(room.timer / 60)}:
+                          {(room.timer % 60).toString().padStart(2, "0")}
+                        </span>
+                        {((room.busCompleteAdViewers?.length || 0) > 0 || (room.adPausedPlayersArray?.length || 0) > 0) ||
+                        Object.values(room.busCompleteCooldowns || {}).some(
+                          (c) => (c as number) > 0,
+                        ) ? (
+                          <span className="text-xs font-bold text-blue-500">
+                            (إنتظار)
+                          </span>
+                        ) : (
+                          <Timer
+                            className={`w-6 h-6 mt-[-4px] ${room.timer <= 60 ? "text-red-500 animate-pulse" : "text-gray-500"}`}
+                          />
+                        )}
+                      </div>
+                    )}
+                    <div
+                      className="flex flex-col items-center bg-white border-2 border-green-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]"
+                      dir="rtl"
+                    >
+                      <span className="text-[10px] font-bold text-gray-400 max-w-[80px] truncate">
+                        {room.players[1]?.name || "لاعب 2"}
+                      </span>
+                      <span className="text-sm font-black text-green-600">
+                        🏆 {room.players[1]?.busCompleteWins || 0}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Empty square for the letter */}
+                <div className="w-14 h-14 md:w-16 md:h-16 border-4 border-dashed border-gray-300 rounded-2xl mx-auto flex items-center justify-center bg-gray-50 text-3xl md:text-4xl font-black text-blue-600 transition-all duration-200 mt-1">
+                  <span
+                    className={
+                      room.gameState === "bus_complete_spin"
+                        ? "animate-pulse"
+                        : ""
+                    }
+                  >
+                    {spinLetter}
+                  </span>
+                </div>
+
+                {room.gameState === "bus_complete_playing" && room.timer > 280 && (!room.busCompleteSubmittedPlayers || room.busCompleteSubmittedPlayers.length === 0) && (
+                  room.busCompleteChangeLetterRequestBy ? (
+                    <button
+                      disabled
+                      className="mx-auto flex items-center justify-center gap-1 text-xs font-bold text-yellow-600 bg-yellow-50 px-3 py-1 rounded-full border border-yellow-200 cursor-not-allowed"
+                    >
+                      <span>طلب معلق!</span>
+                      <span className="text-[10px]">({room.timer - 280})</span>
+                      <span className="animate-pulse">🕒</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        const opponent = room.players?.find((p: any) => p.id !== socket?.id)?.name || "اللاعب الآخر";
+                        showAlert(`انتظر موافقة ${opponent} لتغيير الحرف...`, "جاري الطلب");
+                        socket?.emit("request_change_bus_complete_letter", { roomId });
+                      }}
+                      className="mx-auto flex items-center justify-center gap-1 text-xs font-bold text-gray-400 hover:text-red-500 bg-gray-50 hover:bg-red-50 px-3 py-1 rounded-full transition-colors border"
+                    >
+                      <span>تغيير الحرف</span>
+                      <span className="text-[10px] text-red-400 font-black" dir="ltr">({room.timer - 280})</span>
+                      <X className="w-3 h-3" />
+                    </button>
+                  )
+                )}
+
+                {room.gameState === "bus_complete_setup" && (
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={() => {
+                        playSound("clickOpen");
+                        socket?.emit("search_bus_complete_letter", { roomId, hideResults: hideBusResults });
+                        GameEngineService.handleAction("search_bus_complete_letter", { roomId, hideResults: hideBusResults, playerId: socket?.id });
+                      }}
+                      className="w-full btn-game bg-blue-500 hover:bg-blue-600 text-white shadow-[0_6px_0_0_#1e3a8a] active:shadow-transparent py-2.5 md:py-3 text-lg font-black rounded-2xl flex items-center justify-center gap-2"
+                    >
+                      البحث عن حرف وبدء اللعب 🎲
+                    </button>
+                    <label className="flex items-center my-2 justify-center gap-2 text-sm font-bold text-gray-500 cursor-pointer w-fit mx-auto">
+                      <input 
+                        type="checkbox" 
+                        checked={hideBusResults} 
+                        onChange={(e) => setHideBusResults(e.target.checked)} 
+                        className="w-4 h-4 text-blue-600 rounded bg-gray-100 border-gray-300"
+                      />
+                      إخفاء النتائج عن المنافس
+                    </label>
+                  </div>
+                )}
+
+                {(room.gameState === "bus_complete_playing" ||
+                  room.gameState === "bus_complete_spin") && (
+                  <>
+                    {room.gameState === "bus_complete_playing" && (
+                      <div className="text-center text-red-400 font-bold text-xs animate-pulse drop-shadow-sm -mt-2 mb-0.5">
+                        تجنب الأخطاء الإملائية للفوز بالمباراة
+                      </div>
+                    )}
+
+                    <div
+                      className="space-y-1.5 pt-1 pointer-events-auto"
+                      dir="ltr"
+                    >
+                      {[
+                        { key: "boy", label: "ولد", emoji: "👦" },
+                        { key: "girl", label: "بنت", emoji: "👧" },
+                        { key: "animal", label: "حيوان", emoji: "🦁" },
+                        { key: "plant", label: "نبات", emoji: "🌿" },
+                        { key: "inanimate", label: "جماد", emoji: "🪑" },
+                        { key: "country", label: "بلاد", emoji: "🌍" },
+                      ].map((item) => (
+                        <div
+                          key={item.key}
+                          className={`flex flex-row-reverse items-center justify-between gap-3 bg-white p-1.5 rounded-xl border shadow-sm ${room.busCompleteSubmittedPlayers?.includes(socket?.id) ? "border-gray-200 opacity-70" : "border-gray-100"}`}
+                        >
+                          <div className="flex-shrink-0 w-24 md:w-28 flex flex-row border-l-2 border-gray-100 items-center justify-end font-black text-brown-dark gap-2 text-sm pr-2">
+                            <span>{item.label}</span>
+                            <span>{item.emoji}</span>
+                          </div>
+                          <div className="flex-1 flex flex-row-reverse items-center">
+                            <input
+                              type="text"
+                              className="w-full text-right outline-none bg-transparent font-bold text-gray-800 placeholder-gray-300 text-sm px-2 disabled:text-gray-500 py-0.5"
+                              placeholder={`اكتب ${item.label}...`}
+                              value={
+                                busAnswers[item.key as keyof typeof busAnswers]
+                              }
+                              disabled={
+                                room.gameState !== "bus_complete_playing" ||
+                                room.busCompleteSubmittedPlayers?.includes(
+                                  socket?.id,
+                                )
+                              }
+                              onChange={(e) =>
+                                setBusAnswers((prev) => {
+                                  const newAns = { ...prev, [item.key]: e.target.value };
+                                  socket?.emit("update_bus_answers_draft", { roomId: room.id, answers: newAns });
+                                  GameEngineService.handleAction("update_bus_answers_draft", { roomId: room.id, answers: newAns, playerId: socket?.id });
+                                  return newAns;
+                                })
+                              }
+                              dir="rtl"
+                            />
+                            {room.gameState === "bus_complete_playing" &&
+                              !room.busCompleteSubmittedPlayers?.includes(
+                                socket?.id,
+                              ) &&
+                              (() => {
+                                const ans = busAnswers[item.key as keyof typeof busAnswers];
+                                const hasTyped = !!ans?.trim();
+                                let isCorrect = false;
+                                if (hasTyped && room.busCompleteLetter) {
+                                  let mappedLetter = room.busCompleteLetter;
+                                  if (mappedLetter === "أ" || mappedLetter === "إ" || mappedLetter === "آ") mappedLetter = "ا";
+                                  if (mappedLetter === "ة") mappedLetter = "ه";
+                                  if (mappedLetter === "ى") mappedLetter = "ي";
+
+                                  let mappedAns = normalizeEgyptian(ans.trim());
+                                  let phoneticTargetLetter = normalizeEgyptian(mappedLetter);
+
+                                  if (mappedAns.startsWith(phoneticTargetLetter)) {
+                                    const letterData = (busCompleteData as any)[mappedLetter] || {};
+                                    const validListPhonetic = (letterData[item.key] || []).map((val: string) => normalizeEgyptian(val));
+                                    isCorrect = validListPhonetic.includes(mappedAns);
+                                  }
+                                }
+
+                                return (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {hasTyped && !isCorrect && (
+                                      <span className="text-red-500 font-black px-1 text-sm animate-bounce">❌</span>
+                                    )}
+                                    {isCorrect && (
+                                      <span className="text-green-500 font-black px-1 text-sm">✔️</span>
+                                    )}
+                                    {!isCorrect && (
+                                      <button
+                                        onClick={() => {
+                                          if (
+                                            room.busCompleteCooldowns?.[
+                                              socket?.id || ""
+                                            ] > 0
+                                          )
+                                            return;
+                                          setCustomConfirm({
+                                            show: true,
+                                            title: `حل لغز ${item.label}`,
+                                            message: `هل تود مشاهدة اعلان لحل لغز اجابة ${item.label}؟`,
+                                            confirmText: "نعم",
+                                            cancelText: "لا",
+                                            onConfirm: () => {
+                                              setCustomConfirm((prev) => ({
+                                                ...prev,
+                                                show: false,
+                                              }));
+                                              socket?.emit("bus_complete_ad_start", {
+                                                roomId,
+                                              });
+                                              showBusCompleteAd(
+                                                () => {
+                                                  socket?.emit(
+                                                    "bus_complete_ad_end",
+                                                    { roomId, completed: true },
+                                                  );
+                                                  if (room?.busCompleteLetter) {
+                                                    let mappedLetter =
+                                                      room.busCompleteLetter;
+                                                    if (
+                                                      mappedLetter === "أ" ||
+                                                      mappedLetter === "إ" ||
+                                                      mappedLetter === "آ"
+                                                    )
+                                                      mappedLetter = "ا";
+                                                    if (mappedLetter === "ة")
+                                                      mappedLetter = "ه";
+                                                    if (mappedLetter === "ى")
+                                                      mappedLetter = "ي";
+                                                    const letterData = (
+                                                      busCompleteData as any
+                                                    )[mappedLetter];
+                                                    if (letterData) {
+                                                      const words =
+                                                        letterData[item.key] || [];
+                                                      if (words.length > 0) {
+                                                        const randomWord =
+                                                          words[
+                                                            Math.floor(
+                                                              Math.random() *
+                                                                words.length,
+                                                            )
+                                                          ];
+                                                        setBusAnswers((prev) => {
+                                                          const newAns = { ...prev, [item.key]: randomWord };
+                                                          socket?.emit("update_bus_answers_draft", { roomId: room.id, answers: newAns });
+                                                          return newAns;
+                                                        });
+                                                      }
+                                                    }
+                                                  }
+                                                },
+                                                () => {
+                                                  socket?.emit(
+                                                    "bus_complete_ad_end",
+                                                    { roomId, completed: false },
+                                                  );
+                                                },
+                                              );
+                                            },
+                                          });
+                                        }}
+                                        disabled={
+                                          (room.busCompleteCooldowns?.[
+                                            socket?.id || ""
+                                          ] || 0) > 0
+                                        }
+                                        className={`flex-shrink-0 p-1.5 rounded-full mx-1 border relative disabled:opacity-70 disabled:cursor-not-allowed group overflow-hidden transition-all ${hasTyped ? "bg-red-100 hover:bg-red-200 text-red-600 border-red-300 animate-pulse" : "bg-yellow-100 hover:bg-yellow-200 text-yellow-600 border-yellow-300"}`}
+                                      >
+                                        <Tv
+                                          className={`w-4 h-4 md:w-5 md:h-5 ${hasTyped ? "text-red-500" : "text-yellow-600"} ${room.busCompleteCooldowns?.[socket?.id || ""] > 0 ? "opacity-30" : ""}`}
+                                        />
+                                        {(room.busCompleteCooldowns?.[
+                                          socket?.id || ""
+                                        ] || 0) > 0 && (
+                                          <span className="absolute inset-0 flex items-center justify-center font-black text-xs md:text-sm bg-black/60 text-white leading-none">
+                                            {
+                                              room.busCompleteCooldowns?.[
+                                                socket?.id || ""
+                                              ]
+                                            }
+                                          </span>
+                                        )}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {(() => {
+                      const meSubmitted =
+                        room.busCompleteSubmittedPlayers?.includes(socket?.id);
+                      const opponent = room.players.find(
+                        (p) => p.id !== socket?.id,
+                      );
+                      const opponentSubmitted =
+                        opponent &&
+                        room.busCompleteSubmittedPlayers?.includes(opponent.id);
+
+                      return (
+                        <div className="flex flex-col w-full gap-2 mt-1">
+                          {opponentSubmitted && !meSubmitted && (
+                            <div className="text-center text-red-600 font-bold bg-red-50 py-1.5 rounded-xl text-sm animate-pulse border border-red-200">
+                              {opponent.name} انتهي من التخمين! أسرع!
+                            </div>
+                          )}
+
+                          <button
+                            onClick={() => {
+                              playSound("clickOpen");
+                              socket?.emit("submit_bus_complete", {
+                                roomId,
+                                answers: busAnswers,
+                              });
+                              GameEngineService.handleAction("submit_bus_complete", {
+                                roomId,
+                                answers: busAnswers,
+                                playerId: socket?.id,
+                              });
+                            }}
+                            disabled={
+                              room.gameState !== "bus_complete_playing" ||
+                              meSubmitted ||
+                              ((room.busCompleteAdViewers?.length || 0) > 0 || (room.adPausedPlayersArray?.length || 0) > 0)
+                            }
+                            className={`w-full py-2.5 rounded-2xl font-black text-lg md:text-xl transition-all shadow-[0_6px_0_0_#1e3a8a] active:shadow-transparent
+                              ${room.gameState === "bus_complete_playing" && !meSubmitted && !((room.busCompleteAdViewers?.length || 0) > 0 || (room.adPausedPlayersArray?.length || 0) > 0) ? "bg-blue-500 hover:bg-blue-600 text-white" : "bg-gray-300 text-gray-500 cursor-not-allowed shadow-[0_6px_0_0_#9ca3af]"}`}
+                          >
+                            {meSubmitted
+                              ? "في انتظار اللاعب الآخر..."
+                              : ((room.busCompleteAdViewers?.length || 0) > 0 || (room.adPausedPlayersArray?.length || 0) > 0)
+                                ? "انتظر! المنافس يشاهد إعلان 📺"
+                                : "تخمينة كومبليت 🏁"}
+                          </button>
+
+                          {meSubmitted && (
+                            <button
+                              onClick={() => {
+                                playSound("clickOpen");
+                                socket?.emit("undo_bus_complete", { roomId });
+                                GameEngineService.handleAction("undo_bus_complete", { roomId, playerId: socket?.id });
+                              }}
+                              className="w-full py-2 rounded-2xl font-bold text-base transition-all border-2 border-red-500 text-red-500 hover:bg-red-50"
+                            >
+                              تراجع
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
+              <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
+            </React.Fragment>
+            ) : room.gameState === "bus_complete_evaluating" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-4 md:p-6 text-center space-y-4 md:space-y-6 relative overflow-hidden flex flex-col min-h-[400px]">
+                <h2 className="text-2xl mb-2 font-black text-blue-600">
+                  نتيجة تخمينة كومبليت
+                </h2>
+                
+                <div className="text-xl md:text-2xl font-black p-2 bg-yellow-200 mb-2 text-brown-dark">
+                  {room.busCompleteWinner === socket?.id
+                    ? "🏆 لقد فزت! 🏆"
+                    : room.busCompleteWinner === "tie"
+                      ? "🤝 تعادل!"
+                      : "😢 حظ أوفر المرة القادمة"}
+                </div>
+
+                <div className="flex flex-col mb-1 gap-2">
+                  {room.players.map((p) => {
+                    const score = room.busCompleteScores?.[p.id];
+                    const time = room.busCompleteSubmitTimes?.[p.id];
+                    const isWinner = room.busCompleteWinner === p.id;
+                    const isTie = room.busCompleteWinner === "tie";
+                    if (!score) return null;
+                    return (
+                      <div
+                        key={p.id}
+                        className={`p-2 rounded-2xl border-4 ${isWinner ? "border-accent-orange bg-orange-50" : isTie ? "border-blue-400 bg-blue-50" : "border-gray-200 bg-gray-50"}`}
+                      >
+                        <div className="flex items-center justify-between font-black text-lg text-brown-dark mb-2">
+                          <span className="flex-1 text-right">
+                            {p.name} {p.id === socket?.id ? "(أنت)" : ""}
+                          </span>
+                          <span className="text-accent-orange bg-white px-3 py-1 rounded-full border border-orange-200">
+                            نقاط: {score.total}
+                          </span>
+                        </div>
+                        <div className="text-sm font-bold text-gray-500 mb-2">
+                          الوقت: {time ? (time >= 60 ? `${Math.floor(time / 60)}:${(time % 60).toString().padStart(2, '0')}` : `${time} ثانية`) : "وقت كامل"}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-xs font-bold mt-3">
+                          {[
+                            "boy",
+                            "girl",
+                            "animal",
+                            "plant",
+                            "inanimate",
+                            "country",
+                          ].map((cat) => {
+                            const pts = score[cat as keyof typeof score];
+                            const labels = {
+                              boy: "ولد",
+                              girl: "بنت",
+                              animal: "حيوان",
+                              plant: "نبات",
+                              inanimate: "جماد",
+                              country: "بلاد",
+                            };
+                            const playerAnswers = room.busCompleteAnswers?.[p.id];
+                            let answerText = playerAnswers ? (playerAnswers as any)[cat] : "";
+                            const isMe = p.id === socket?.id;
+                            
+                            if (!isMe) {
+                              if (pts > 0) {
+                                if (room.busCompleteHideResults) {
+                                  answerText = "إجابة صحيحة";
+                                }
+                              } else if (room.matchType === "random") {
+                                answerText = answerText ? "إجابة خاطئة" : "";
+                              }
+                            }
+
+                            return (
+                              <div
+                                key={cat}
+                                className={`flex flex-col items-center p-1.5 rounded-xl border ${pts > 0 ? "bg-green-100 border-green-200 text-green-700" : "bg-red-50 border-red-100 text-red-500"}`}
+                              >
+                                <span>
+                                  {labels[cat as keyof typeof labels]}
+                                </span>
+                                <span className="text-sm my-0.5">{pts > 0 ? "✔️" : "❌"}</span>
+                                <span className={`text-[11px] mt-0.5 text-center font-bold break-all line-clamp-1 max-w-full px-1 ${pts > 0 ? (room.busCompleteHideResults && !isMe ? "text-green-600" : "text-black") : (room.busCompleteHideResults && !isMe ? "text-red-500" : "text-black")}`}>
+                                  {answerText ? `${answerText}` : "—"}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-2 w-full">
+                  <GameEndControls
+                    room={room}
+                    socket={socket}
+                    myId={socket?.id}
+                    playerSerial={playerSerial}
+                    rematchLabel="🔄 اللعب مرة أخرى كومبليت"
+                    onRematch={() => {
+                      socket?.emit("request_bus_complete_rematch", {
+                        roomId,
+                      });
+                      GameEngineService.handleAction("request_bus_complete_rematch", {
+                        roomId,
+                        playerId: socket?.id,
+                      });
+                      setBusAnswers({
+                        boy: "",
+                        girl: "",
+                        animal: "",
+                        plant: "",
+                        inanimate: "",
+                        country: "",
+                      });
+                    }}
+                    onChangeGame={() => {
+                      setBusAnswers({
+                        boy: "",
+                        girl: "",
+                        animal: "",
+                        plant: "",
+                        inanimate: "",
+                        country: "",
+                      });
+                    }}
+                    onLeaveGame={handleLeaveGame}
+                    playSound={playSound}
+                  />
+                </div>
+              </div>
+              <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
+            </React.Fragment>
+            
+            ) : room.gameState.startsWith("speed_cups_") ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                {renderSpeedCupsRewardBar()}
+                
+                <SpeedCupsBoard room={room} socket={socket} me={me} myId={socket?.id || ""} onLeave={handleLeaveGame} playSound={playSound} />
+                
+                </div>
+              </React.Fragment>
+
+            ) : room.gameState === "dots_playing" || room.gameState === "dots_finished" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                {renderDotsRewardBar()}
+                {room.gameState === "dots_finished" && room.dotsLevel === 3 ? (
+                  <div className="w-full py-1 flex flex-col items-center justify-center animate-fade-in text-center space-y-6">
+                    <div className="w-full bg-white rounded-2xl p-2 shadow-sm border-2 border-purple-100 flex flex-col items-center gap-2">
+                      <div className="flex items-center justify-center gap-2 text-xl font-black text-purple-700">
+                        🏆 بطل تخمينة نقطة وخط 🏆
+                      </div>
+                      
+                      <div className="flex w-full items-center justify-center gap-4 my-0.5">
+                        {/* Player 1 Stats */}
+                        <div className="flex flex-col items-center gap-2 p-3 bg-purple-50 rounded-xl border-2 border-purple-200 w-1/2">
+                          <div className="font-black text-lg md:text-xl text-brown-dark truncate max-w-full px-2 text-center">
+                            {(room.players.find((p: any) => p.id === room.dotsPlayer1)?.name || "اللاعب 1").split(" ")[0]}
+                          </div>
+                          <div className="text-2xl md:text-3xl font-black text-purple-600 bg-white w-full text-center py-1 rounded-lg border-2 border-purple-200">
+                            {room.dotsMatchWins?.[room.dotsPlayer1 || ""] || 0}
+                          </div>
+                        </div>
+                        
+                        <div className="text-2xl md:text-3xl font-black text-gray-400">VS</div>
+                        
+                        {/* Player 2 Stats */}
+                        <div className="flex flex-col items-center gap-2 p-3 bg-purple-50 rounded-xl border-2 border-purple-200 w-1/2">
+                          <div className="font-black text-lg md:text-xl text-brown-dark truncate max-w-full px-2 text-center">
+                            {(room.players.find((p: any) => p.id === room.dotsPlayer2)?.name || "اللاعب 2").split(" ")[0]}
+                          </div>
+                          <div className="text-2xl md:text-3xl font-black text-purple-600 bg-white w-full text-center py-1 rounded-lg border-2 border-purple-200">
+                            {room.dotsMatchWins?.[room.dotsPlayer2 || ""] || 0}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-center font-bold text-black bg-gray-300 px-4 py-2 rounded-lg border border-gray-200">
+                        {(() => {
+                          const p1Wins = room.dotsMatchWins?.[room.dotsPlayer1 || ""] || 0;
+                          const p2Wins = room.dotsMatchWins?.[room.dotsPlayer2 || ""] || 0;
+                          if (p1Wins > p2Wins) {
+                            return `الفائز هو ${room.players.find((p: any) => p.id === room.dotsPlayer1)?.name}! 🎉`;
+                          } else if (p2Wins > p1Wins) {
+                            return `الفائز هو ${room.players.find((p: any) => p.id === room.dotsPlayer2)?.name}! 🎉`;
+                          }
+                          return "تعادل! ماحدش قدر يحسمها! 🤝";
+                        })()}
+                      </div>
+
+                      <div className="w-full max-w-sm mt-1">
+                        <GameEndControls
+                          room={room}
+                          socket={socket}
+                          myId={socket?.id}
+                          playerSerial={playerSerial}
+                          rematchLabel="لعب مرة أخري!"
+                          onRematch={() => {
+                            const myId = room.players[0]?.id || socket?.id;
+                            socket?.emit("restart_dots", { roomId: room.id });
+                            GameEngineService.handleAction("restart_dots", { roomId: room.id, playerId: myId });
+                          }}
+                          onLeaveGame={handleLeaveGame}
+                          playSound={playSound}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <React.Fragment>
+                    {room.players.length === 2 && (
+                      <div className="flex justify-between items-center w-full mb-1 px-1">
+                        <div className="flex flex-col items-center bg-white border-2 border-red-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                          <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                            {(room.players.find((p: any) => p.id === room.dotsPlayer1)?.name || "اللاعب 1").substring(0, 5)}
+                            <span className="w-3 h-3 rounded-sm bg-red-500"></span>
+                          </span>
+                          <span className="text-sm font-black text-red-500">🏆 {room.players.find((p: any) => p.id === room.dotsPlayer1)?.dotsWins || 0}</span>
+                        </div>
+
+                        <div className={`flex justify-center items-center gap-1 mx-2 ${room.gameState !== "dots_finished" ? "border-2 border-green-200 px-3 py-1 rounded-xl shadow-sm min-w-[70px]" : "font-black text-lg text-brown-dark"}`} dir="ltr">
+                            {room.gameState === "dots_finished" ? (
+                               <span>انتهت المباراة</span>
+                            ) : (
+                               <span className={`text-2xl font-black font-mono tracking-wider ${room.timer <= 60 ? "text-red-600" : "text-gray-700"}`}>
+                                 {Math.floor(room.timer / 60)}:{(room.timer % 60).toString().padStart(2, "0")}
+                               </span>
+                            )}
+                        </div>
+
+                        <div className="flex flex-col items-center bg-white border-2 border-green-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                          <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                            {(room.players.find((p: any) => p.id === room.dotsPlayer2)?.name || "اللاعب 2").substring(0, 5)}
+                            <span className="w-3 h-3 rounded-sm bg-blue-500"></span>
+                          </span>
+                          <span className="text-sm font-black text-blue-600">🏆 {room.players.find((p: any) => p.id === room.dotsPlayer2)?.dotsWins || 0}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="text-center mb-1 px-2 mt-1">
+                      <p className="text-xs md:text-sm font-bold text-blue-600 bg-blue-50 p-2 rounded-xl border border-blue-100 w-fit mx-auto shadow-sm">
+                        المستوي {room.dotsLevel || 1} - وصل النقط واكسب مربعات اكتر!
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col w-full h-full mb-0.5 bg-white rounded-xl shadow-inner border border-gray-100">
+
+                      <div className="flex-1 w-full flex items-center justify-center p-2 relative">
+                        <div className="relative mx-auto bg-purple-50 p-2 rounded-xl shadow-inner" style={{
+                           width: 'min(100%, 350px)',
+                           aspectRatio: '1/1'
+                        }}>
+                          {(() => {
+                             const size = room.dotsBoardSize || 4;
+                             const dots = [];
+                             for (let r = 0; r < size; r++) {
+                               for (let c = 0; c < size; c++) {
+                                 dots.push({r, c});
+                               }
+                             }
+                             const dotSpacing = 100 / (size - 1);
+                             
+                             return (
+                               <div className="w-full h-full relative">
+                                 {showDotsTutorial && (
+                                   <div 
+                                     className="absolute inset-0 z-[100] flex items-center justify-center bg-white/80 backdrop-blur-sm rounded-xl cursor-pointer" 
+                                     onClick={() => {
+                                       setShowDotsTutorial(false);
+                                       localStorage.setItem("dots_tutorial_seen", "true");
+                                     }}
+                                   >
+                                     <div className="bg-white p-4 md:p-4 rounded-2xl shadow-xl border-4 border-blue-200 text-center mx-4">
+                                       <div className="flex justify-center items-center h-16 w-32 mx-auto relative mb-2">
+                                         {/* Dot 1 */}
+                                         <div className="absolute left-0 top-1/2 -translate-y-1/2 w-5 h-5 bg-gray-500 rounded-full z-10"></div>
+                                         {/* Dot 2 */}
+                                         <div className="absolute right-0 top-1/2 -translate-y-1/2 w-5 h-5 bg-gray-500 rounded-full z-10"></div>
+                                         {/* Line */}
+                                         <div className="absolute left-3 right-3 top-1/2 -translate-y-1/2 h-3 bg-blue-400"></div>
+                                         {/* Hand Icon */}
+                                         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-4xl z-10 animate-pulse mt-2">👆</div>
+                                       </div>
+                                       <h3 className="font-black text-lg md:text-xl text-blue-600 mb-2">كيفية اللعب؟</h3>
+                                       <p className="font-bold text-gray-700 text-sm md:text-base leading-relaxed">
+                                         اضغط في الفراغ بين أي نقطتين<br/>
+                                         لترسم خطاً وتكمل المربع!
+                                       </p>
+                                       <div className="btn-game btn-danger py-2 mb-2 mt-3 text-x1 text-gray-400 font-bold">(اضغط للبدء)</div>
+                                     </div>
+                                   </div>
+                                 )}
+                                 {/* Boxes */}
+                                 {(() => {
+                                   const boxes = [];
+                                   for (let r = 0; r < size - 1; r++) {
+                                     for (let c = 0; c < size - 1; c++) {
+                                       const owner = room.dotsBoxes?.[`${r},${c}`];
+                                       if (owner) {
+                                         const isP1 = owner === room.dotsPlayer1;
+                                         boxes.push(
+                                           <div key={`box-${r}-${c}`} className={`absolute transition-none ${isP1 ? 'bg-red-200' : 'bg-blue-200'}`} style={{
+                                              left: `${c * dotSpacing}%`,
+                                              top: `${r * dotSpacing}%`,
+                                              width: `${dotSpacing}%`,
+                                              height: `${dotSpacing}%`,
+                                              transform: 'scale(0.95)'
+                                           }} />
+                                         );
+                                       }
+                                     }
+                                   }
+                                   return boxes;
+                                 })()}
+                                 
+                                 {/* Lines */}
+                                 {(() => {
+                                   const lines = [];
+                                   const myId = room.players[0]?.id || socket?.id;
+                                   const myTurn = (room.dotsTurn === socket?.id || room.dotsTurn === myId) && room.gameState === "dots_playing";
+                                   const activeLineColor = room.dotsTurn === room.dotsPlayer1 ? 'bg-red-400' : 'bg-blue-400';
+                                   const hoverColor = room.dotsTurn === room.dotsPlayer1 ? 'hover:bg-red-200' : 'hover:bg-blue-200';
+                                   
+                                   // Horizontal lines
+                                   for (let r = 0; r < size; r++) {
+                                     for (let c = 0; c < size - 1; c++) {
+                                       const lineId = `${r},${c}-${r},${c+1}`;
+                                       const owner = room.dotsLines?.[lineId];
+                                       const isP1 = owner === room.dotsPlayer1;
+                                       const isLastMove = lineId === room.dotsLastMove;
+                                       lines.push(
+                                         <div 
+                                            key={`h-${r}-${c}`} 
+                                            onClick={() => {
+                                               if (myTurn && !owner) {
+                                                 playSound("handXFill");
+                                                 // Optimistic update for 0ms visual feedback
+                                                 setRoom(prev => {
+                                                   if (!prev) return prev;
+                                                   return {
+                                                     ...prev,
+                                                     dotsLines: {
+                                                       ...prev.dotsLines,
+                                                       [lineId]: socket?.id
+                                                     },
+                                                     dotsLastMove: lineId
+                                                   };
+                                                 });
+                                                 socket?.emit("submit_dots_move", { roomId: room.id, r1: r, c1: c, r2: r, c2: c+1 });
+                                                 GameEngineService.handleAction("submit_dots_move", { roomId: room.id, r1: r, c1: c, r2: r, c2: c+1, playerId: myId });
+                                               }
+                                            }}
+                                            className={`absolute cursor-pointer ${owner ? (isP1 ? `bg-red-500 z-10 ${isLastMove ? 'animate-pulse' : 'transition-none'}` : `bg-blue-500 z-10 ${isLastMove ? 'animate-pulse' : 'transition-none'}`) : `bg-transparent z-20 ${myTurn ? `transition-colors duration-75 ${hoverColor}` : ''}`}`} 
+                                            style={{
+                                              left: `${c * dotSpacing}%`,
+                                              top: `calc(${r * dotSpacing}% - 6px)`,
+                                              width: `${dotSpacing}%`,
+                                              height: '12px',
+                                              borderRadius: '6px'
+                                            }} 
+                                         />
+                                       );
+                                     }
+                                   }
+                                   
+                                   // Vertical lines
+                                   for (let r = 0; r < size - 1; r++) {
+                                     for (let c = 0; c < size; c++) {
+                                       const lineId = `${r},${c}-${r+1},${c}`;
+                                       const owner = room.dotsLines?.[lineId];
+                                       const isP1 = owner === room.dotsPlayer1;
+                                       const isLastMove = lineId === room.dotsLastMove;
+                                       lines.push(
+                                         <div 
+                                            key={`v-${r}-${c}`}
+                                            onClick={() => {
+                                               if (myTurn && !owner) {
+                                                 playSound("handXFill");
+                                                 // Optimistic update for 0ms visual feedback
+                                                 setRoom(prev => {
+                                                   if (!prev) return prev;
+                                                   return {
+                                                     ...prev,
+                                                     dotsLines: {
+                                                       ...prev.dotsLines,
+                                                       [lineId]: socket?.id
+                                                     },
+                                                     dotsLastMove: lineId
+                                                   };
+                                                 });
+                                                 socket?.emit("submit_dots_move", { roomId: room.id, r1: r, c1: c, r2: r+1, c2: c });
+                                                 GameEngineService.handleAction("submit_dots_move", { roomId: room.id, r1: r, c1: c, r2: r+1, c2: c, playerId: myId });
+                                               }
+                                            }}
+                                            className={`absolute cursor-pointer ${owner ? (isP1 ? `bg-red-500 z-10 ${isLastMove ? 'animate-pulse' : 'transition-none'}` : `bg-blue-500 z-10 ${isLastMove ? 'animate-pulse' : 'transition-none'}`) : `bg-transparent z-20 ${myTurn ? `transition-colors duration-75 ${hoverColor}` : ''}`}`} 
+                                            style={{
+                                              left: `calc(${c * dotSpacing}% - 6px)`,
+                                              top: `${r * dotSpacing}%`,
+                                              width: '12px',
+                                              height: `${dotSpacing}%`,
+                                              borderRadius: '6px'
+                                            }} 
+                                         />
+                                       );
+                                     }
+                                   }
+                                   return lines;
+                                 })()}
+                                 
+                                 {/* Dots */}
+                                 {dots.map((d, i) => (
+                                   <div key={`dot-${i}`} className={`absolute w-4 h-4 rounded-full z-30 shadow-sm transition-colors duration-100 ${room.dotsTurn === room.dotsPlayer1 ? 'bg-red-500 border-2 border-red-600' : 'bg-blue-500 border-2 border-blue-600'}`} style={{
+                                     left: `calc(${d.c * dotSpacing}% - 8px)`,
+                                     top: `calc(${d.r * dotSpacing}% - 8px)`
+                                   }}></div>
+                                 ))}
+                               </div>
+                             );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {room.gameState === "dots_playing" && (
+                       <div className="text-center my-1 font-bold text-base md:text-lg mb-2 flex flex-col items-center gap-1">
+                          {(room.dotsTurn === socket?.id || room.dotsTurn === (room.players[0]?.id || socket?.id)) ? (
+                             <span key="dots-turn-mine" className="text-purple-600 bg-purple-50 px-4 py-1 rounded-full border border-purple-200">دورك الآن للعب!</span>
+                          ) : (
+                             <span key="dots-turn-opponent" className="text-gray-500 bg-gray-50 px-4 py-1 rounded-full border border-gray-200">في انتظار الخصم أن يلعب...</span>
+                          )}
+                          <div className="flex gap-4 text-xs mt-1 justify-center">
+                            <span className="text-red-500 font-black px-2 bg-red-50 rounded border border-red-200">مربعاتك: {(room.dotsPlayer1 === socket?.id || room.dotsPlayer1 === (room.players[0]?.id || socket?.id)) ? room.dotsP1Score : room.dotsP2Score} 🟥</span>
+                            <span className="text-blue-500 font-black px-2 bg-blue-50 rounded border border-blue-200">مربعات الخصم: {(room.dotsPlayer1 !== socket?.id && room.dotsPlayer1 !== (room.players[0]?.id || socket?.id)) ? room.dotsP1Score : room.dotsP2Score} 🟦</span>
+                          </div>
+                       </div>
+                    )}
+                    
+                    {room.gameState === "dots_finished" && (
+                      <React.Fragment>
+                        <div className="text-center my-1 font-bold text-lg md:text-xl text-green-600 bg-green-50 py-2 rounded-xl border border-green-200 mb-2">
+                          {(() => {
+                            const myId = room.players[0]?.id || socket?.id;
+                            if (room.dotsWinner === "draw") return "تعادل في هذا المستوى! 🤝";
+                            if (room.dotsWinner === socket?.id || room.dotsWinner === myId) return "مبروك كسبت المستوى ده! 🎉";
+                            return "حظ أوفر! خصمك كسب المستوى ده 😢";
+                          })()}
+                        </div>
+                        {room.dotsLevel < 3 && (
+                          <div className="w-full max-w-sm mt-4 mx-auto px-2">
+                            <GameEndControls
+                              room={room}
+                              socket={socket}
+                              myId={socket?.id}
+                              playerSerial={playerSerial}
+                              rematchLabel={`انتقل الي المستوي ${(room.dotsLevel || 1) + 1}`}
+                              onRematch={() => {
+                                const myId = room.players[0]?.id || socket?.id;
+                                socket?.emit("restart_dots", { roomId: room.id });
+                                GameEngineService.handleAction("restart_dots", { roomId: room.id, playerId: myId });
+                              }}
+                              onLeaveGame={handleLeaveGame}
+                              playSound={playSound}
+                            />
+                          </div>
+                        )}
+                      </React.Fragment>
+                    )}
+                  </React.Fragment>
+                )}
+                </div>
+              </React.Fragment>
+
+            ) : room.gameState === "iq_playing" || room.gameState === "iq_finished" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                {renderIQRewardBar()}
+                {room.gameState === "iq_finished" && room.iqLevel === 3 ? (
+                  <div className="w-full py-1 flex flex-col items-center justify-center animate-fade-in text-center space-y-6">
+                    
+                    <div className="space-y-2 mb-2">
+                      <h2 className="text-2xl md:text-3xl font-black text-brown-dark">انتهت مباراة الذكاء!</h2>
+                      <p className="text-xs md:text-sm font-bold text-gray-500 bg-gray-100 px-3 py-1 rounded-full border w-fit mx-auto">اكتملت جميع المستويات الثلاثة</p>
+                    </div>
+
+                    <div className="w-full max-w-sm bg-white border-4 border-dashed border-gray-200 rounded-3xl mb-2 p-2 md:p-3 space-y-4">
+                      {(() => {
+                        const p1 = room.players.find((p: any) => p.id === room.iqPlayer1) || room.players[0] || { id: "p1", name: "لاعب 1" };
+                        const p2 = room.players.find((p: any) => p.id === room.iqPlayer2) || room.players[1] || { id: "p2", name: "لاعب 2" };
+                        
+                        const p1Wins = room.iqMatchWins?.[p1.id] || 0;
+                        const p2Wins = room.iqMatchWins?.[p2.id] || 0;
+                        
+                        const isP1Winner = p1Wins > p2Wins;
+                        const isP2Winner = p2Wins > p1Wins;
+                        const isDraw = p1Wins === p2Wins;
+                        
+                        const me = room.players.find((p: any) => p.id === socket?.id);
+                        
+                        let matchResult = "";
+                        let resultColor = "";
+                        
+                        if (isDraw) {
+                          matchResult = "النتيجة النهائية تعادل! 🤝";
+                          resultColor = "text-gray-600 bg-gray-50 border-gray-200";
+                        } else if ((isP1Winner && me?.id === p1.id) || (isP2Winner && me?.id === p2.id)) {
+                          matchResult = "لقد فزت بالمباراة! 🎉";
+                          resultColor = "text-green-600 bg-green-50 border-green-200 animate-pulse";
+                        } else {
+                          matchResult = "لقد خسرت المباراة! 😔";
+                          resultColor = "text-red-500 bg-red-50 border-red-200";
+                        }
+
+                        return (
+                          <div className="space-y-4">
+                            <div className={`text-base md:text-lg font-black mb-2 p-2 rounded-2xl border ${resultColor}`}>
+                              {matchResult}
+                            </div>
+                            
+                            <div className="flex justify-around items-center gap-3">
+                              <div className="flex flex-col items-center gap-1.5 p-3 bg-red-50 border border-red-100 rounded-2xl w-1/2">
+                                <span className="text-xs md:text-sm font-bold text-red-600 max-w-[100px] truncate">{p1.name}</span>
+                                <span className="text-3xl font-black text-red-500">{p1Wins}</span>
+                                <span className="text-[10px] text-red-400">فوز بالمستويات</span>
+                              </div>
+                              <div className="text-xl font-black text-gray-400">VS</div>
+                              <div className="flex flex-col items-center gap-1.5 p-3 bg-green-50 border border-green-100 rounded-2xl w-1/2">
+                                <span className="text-xs md:text-sm font-bold text-green-600 max-w-[100px] truncate">{p2.name}</span>
+                                <span className="text-3xl font-black text-green-500">{p2Wins}</span>
+                                <span className="text-[10px] text-green-400">فوز بالمستويات</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    <div className="w-full max-w-sm">
+                      <GameEndControls
+                        room={room}
+                        socket={socket}
+                        myId={socket?.id}
+                        playerSerial={playerSerial}
+                        rematchLabel="لعب مرة أخري!"
+                        onRematch={() => {
+                          const myId = room.players[0]?.id || socket?.id;
+                          socket?.emit("restart_iq", { roomId: room.id });
+                          GameEngineService.handleAction("restart_iq", { roomId: room.id, playerId: myId });
+                        }}
+                        onLeaveGame={handleLeaveGame}
+                        playSound={playSound}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <React.Fragment>
+                    {room.players.length === 2 && (
+                      <div className="flex justify-between items-center w-full mb-1 px-1">
+                        <div className="flex flex-col items-center bg-white border-2 border-red-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                          <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                            {(room.players.find((p: any) => p.id === room.iqPlayer1)?.name || "اللاعب 1").substring(0, 5)}
+                            <span className="w-3 h-3 rounded-sm bg-red-500 border border-red-700"></span>
+                          </span>
+                          <span className="text-sm font-black text-red-500">🏆 {room.players.find((p: any) => p.id === room.iqPlayer1)?.iqWins || 0}</span>
+                        </div>
+
+                        <div className={`flex justify-center items-center gap-1 mx-2 ${room.gameState !== "iq_finished" ? "border-2 border-green-200 px-3 py-1 rounded-xl shadow-sm min-w-[70px]" : "font-black text-lg text-brown-dark"}`} dir="ltr">
+                            {room.gameState === "iq_finished" ? (
+                               <span>انتهت المباراة</span>
+                            ) : (
+                               <span className={`text-2xl font-black font-mono tracking-wider ${room.timer <= 60 ? "text-red-600" : "text-gray-700"}`}>
+                                 {Math.floor(room.timer / 60)}:{(room.timer % 60).toString().padStart(2, "0")}
+                               </span>
+                            )}
+                        </div>
+
+                        <div className="flex flex-col items-center bg-white border-2 border-green-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                          <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                            {(room.players.find((p: any) => p.id === room.iqPlayer2)?.name || "اللاعب 2").substring(0, 5)}
+                            <span className="w-3 h-3 rounded-sm bg-green-500 border border-green-700"></span>
+                          </span>
+                          <span className="text-sm font-black text-green-600">🏆 {room.players.find((p: any) => p.id === room.iqPlayer2)?.iqWins || 0}</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="text-center mb-1 px-2 mt-1">
+                      <p className="text-xs md:text-sm font-bold text-blue-600 bg-blue-50 p-2 rounded-xl border border-blue-100 w-fit mx-auto shadow-sm">
+                        المستوي {room.iqLevel || 1} {room.iqCategoryName ? `(${room.iqCategoryName})` : ""} - طابق الصور المتشابهة للفوز!
+                      </p>
+                    </div>
+
+                    <div className="flex-1 flex flex-col items-center justify-center relative z-10 py-1 mb-0.5 w-full">
+                      <div 
+                        className={`bg-gray-100 p-1 rounded-xl w-full mx-auto shadow-inner Battery-border-2 border-gray-300 ${
+                          room.iqBoardSize === 4 ? "max-w-[420px]" : room.iqBoardSize === 6 ? "max-w-[560px]" : "max-w-[680px]"
+                        }`}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: `repeat(${room.iqBoardSize || 4}, minmax(0, 1fr))`,
+                          gap: (room.iqBoardSize || 4) > 6 ? '2px' : (room.iqBoardSize || 4) === 6 ? '3px' : '5px'
+                        }}
+                      >
+                        {room.iqBoard?.map((cellImg: any, idx: number) => {
+                          const isFlipped = room.iqFlipped?.includes(idx) || room.iqMatched?.includes(idx);
+                          const isMatched = room.iqMatched?.includes(idx);
+                          const myId = room.players[0]?.id || socket?.id;
+                          const myTurn = (room.iqTurn === socket?.id || room.iqTurn === myId) && room.gameState === "iq_playing";
+                          
+                          const cellImgSrc = cellImg
+                            ? (cellImg.startsWith("http") || cellImg.startsWith("blob:") || cellImg.startsWith("data:"))
+                              ? cellImg
+                              : cellImg.startsWith("/")
+                                ? apiUrl(cellImg)
+                                : `data:image/png;base64,${cellImg}`
+                            : "";
+
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              disabled={!myTurn || isFlipped}
+                              onClick={() => {
+                                 socket?.emit("submit_iq_move", { roomId: room.id, index: idx });
+                                 GameEngineService.handleAction("submit_iq_move", { roomId: room.id, index: idx, playerId: myId });
+                                 playSound("handXFill");
+                              }}
+                              className={`aspect-square w-full relative p-0 m-0 border-0 flex items-center justify-center overflow-hidden touch-manipulation select-none
+                                ${room.iqBoardSize === 8 ? "rounded-none" : room.iqBoardSize === 6 ? "rounded-sm" : "rounded-md"}
+                                ${isFlipped 
+                                  ? (isMatched ? "bg-gray-100 opacity-60" : "bg-white") 
+                                  : (room.iqTurn === room.iqPlayer1 ? "bg-red-500 hover:bg-red-600" : "bg-green-500 hover:bg-green-600")
+                                }
+                              `}
+                            >
+                              {isFlipped ? (
+                                <div className={`w-full h-full p-0 m-0 flex items-center justify-center overflow-hidden ${isMatched ? "grayscale" : ""}`}>
+                                  {cellImgSrc ? (
+                                    <img 
+                                      src={cellImgSrc} 
+                                      alt="card" 
+                                      loading="eager"
+                                      decoding="sync"
+                                      className="w-full h-full object-cover pointer-events-none select-none" 
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center pointer-events-none">
+                                  <span className={`text-white font-black opacity-40 ${room.iqBoardSize === 8 ? "text-xs md:text-sm" : room.iqBoardSize === 6 ? "text-sm md:text-lg" : "text-base md:text-xl"}`}>?</span>
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    
+                    {room.gameState === "iq_playing" && (
+                       <div className="text-center my-1 font-bold text-base md:text-lg mb-2 flex flex-col items-center gap-1">
+                          {(room.iqTurn === socket?.id || room.iqTurn === (room.players[0]?.id || socket?.id)) ? (
+                             <span key="iq-turn-mine" className="text-blue-600 animate-pulse bg-blue-50 px-4 py-1 rounded-full border border-blue-200">دورك الآن للعب! ⏳ {room.iqTurnTimer}</span>
+                          ) : (
+                             <span key="iq-turn-opponent" className="text-gray-500 bg-gray-50 px-4 py-1 rounded-full border border-gray-200">في انتظار الخصم أن يلعب... ⏳ {room.iqTurnTimer}</span>
+                          )}
+                          
+                          <div className="flex gap-4 text-sm mt-1">
+                            <span className="text-red-500 font-black px-2 bg-red-50 rounded border border-red-200">نقاطك: {(room.iqPlayer1 === socket?.id || room.iqPlayer1 === room.players[0]?.id) ? room.iqP1Score : room.iqP2Score}</span>
+                            <span className="text-gray-500 font-black px-2 bg-gray-50 rounded border border-gray-200">نقاط الخصم: {(room.iqPlayer1 === socket?.id || room.iqPlayer1 === room.players[0]?.id) ? room.iqP2Score : room.iqP1Score}</span>
+                          </div>
+                       </div>
+                    )}
+                    
+                    {room.gameState === "iq_finished" && (
+                       <div className="flex flex-col text-center my-0.5 w-full animate-fade-in-up">
+                         <div className="mb-1">
+                           {room.iqWinner === "draw" ? (
+                              <div className="bg-gray-100 text-gray-700 px-4 py-2 rounded-xl font-black text-lg shadow-sm border border-gray-200">
+                                تعادل! 🤝
+                              </div>
+                           ) : (room.iqWinner === socket?.id || room.iqWinner === room.players[0]?.id) ? (
+                              <div className="bg-green-100 text-green-700 px-4 py-2 rounded-xl font-black text-lg shadow-sm border border-green-200 animate-pulse">
+                                أنت الفائز بالجولة! 🎉
+                              </div>
+                           ) : (
+                              <div className="bg-red-100 text-red-600 px-4 py-2 rounded-xl font-black text-lg shadow-sm border border-red-200">
+                                حظ أوفر المرة القادمة! 💔
+                              </div>
+                           )}
+                         </div>
+                         
+                         <div className="flex flex-row gap-2 mt-1 px-2">
+                           <button
+                             onClick={() => {
+                                playSound("clickOpen");
+                                socket?.emit("play_again", { roomId: room.id });
+                             }}
+                             className="flex-1 btn-game bg-gray-100 hover:bg-gray-200 text-gray-700 shadow-[0_4px_0_0_#d1d5db] active:shadow-transparent py-2.5 text-xs md:text-sm font-black rounded-2xl flex items-center justify-center gap-1.5"
+                           >
+                             تغيير اللعبة
+                           </button>
+                           <button
+                             onClick={() => {
+                                playSound("clickOpen");
+                                const myId = room.players[0]?.id || socket?.id;
+                                socket?.emit("restart_iq", { roomId: room.id });
+                                GameEngineService.handleAction("restart_iq", { roomId: room.id, playerId: myId });
+                             }}
+                             disabled={((room.adPausedPlayersArray?.length || 0) > 0) || (room.iqLevel === 3 && room.iqRematchRequestedBy?.includes(socket?.id || ""))}
+                             className={`flex-1 btn-game py-2.5 text-xs md:text-sm font-black rounded-2xl flex items-center justify-center gap-1.5
+                               ${((room.adPausedPlayersArray?.length || 0) > 0) ? "bg-gray-300 text-gray-500 shadow-none cursor-not-allowed" : 
+                                 room.iqLevel === 3 && room.iqRematchRequestedBy?.includes(room.players.find((p: any) => p.id !== socket?.id)?.id || "")
+                                  ? "bg-blue-500 hover:bg-blue-600 text-white shadow-[0_4px_0_0_#1e3a8a] active:shadow-transparent"
+                                  : room.iqLevel === 3 && room.iqRematchRequestedBy?.includes(socket?.id || "")
+                                    ? "bg-blue-500 hover:bg-blue-600 text-white shadow-[0_4px_0_0_#1e3a8a]"
+                                    : "bg-blue-100 hover:bg-blue-200 text-blue-700 shadow-[0_4px_0_0_#93c5fd] active:shadow-transparent"}`}
+                           >
+                             {((room.adPausedPlayersArray?.length || 0) > 0) ? "انتظر! المنافس يشاهد إعلان 📺"
+                               : (room.iqLevel || 1) < 3 ? `انتقل الي المستوي ${(room.iqLevel || 1) + 1}`
+                               : room.iqRematchRequestedBy?.includes(socket?.id || "") ? "في انتظار المنافس..."
+                              : room.iqRematchRequestedBy?.includes(room.players.find((p: any) => p.id !== socket?.id)?.id || "") ? "🎮 المنافس جاهز للعب"
+                              : "لعب مرة أخري!"}
+                           </button>
+                         </div>
+                         
+                         <button
+                             onClick={handleLeaveGame}
+                             className="w-auto mx-4 btn-game bg-red-100 hover:bg-red-200 text-red-600 shadow-[0_4px_0_0_#fca5a5] active:shadow-transparent py-2.5 text-sm md:text-base font-black rounded-2xl flex items-center justify-center gap-1.5 mt-2"
+                           >
+                             🚪 خروج للرئيسية
+                           </button>
+                       </div>
+                    )}
+                  </React.Fragment>
+                )}
+                </div>
+                <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
+              </React.Fragment>
+
+            ) : room.gameState === "bomb_party_setup" || room.gameState === "bomb_party_playing" || room.gameState === "bomb_party_finished" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto] bg-gray-900 border-red-500">
+                <div className={room.gameState === "bomb_party_finished" ? "block w-full" : "hidden"}>
+                  {renderBombPartyRewardBar()}
+                </div>
+                
+                <div className="relative flex-1 flex flex-col w-full h-full space-y-2 md:space-y-3">
+                {room.players.length === 2 && (
+                  <div className="flex justify-between items-center w-full mb-1 px-1 relative z-20" dir="ltr">
+                    <div className={`flex flex-col items-center ${room.bombParty?.turnPlayerId === room.players[1].id ? 'bg-red-900 border-red-400' : 'bg-gray-800 border-red-500'} border-2 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px] text-white transition-colors`}>
+                      <span className="text-[10px] md:text-xs font-black text-gray-300 max-w-[80px] break-words text-center flex items-center justify-center gap-1" dir="rtl">
+                        {(room.players[1].name || "اللاعب").substring(0, 8)}
+                      </span>
+                      <span className="text-sm font-black text-red-500" dir="rtl">🏆 {room.players[1].bombPartyWins || 0}</span>
+                    </div>
+
+                    <div className={`flex flex-col items-center ${room.bombParty?.turnPlayerId === room.players[0].id ? 'bg-red-900 border-red-400' : 'bg-gray-800 border-red-500'} border-2 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px] text-white transition-colors`}>
+                      <span className="text-[10px] md:text-xs font-black text-gray-300 max-w-[80px] break-words text-center flex items-center justify-center gap-1" dir="rtl">
+                        {(room.players[0].name || "اللاعب").substring(0, 8)}
+                      </span>
+                      <span className="text-sm font-black text-red-500" dir="rtl">🏆 {room.players[0].bombPartyWins || 0}</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Animated Burning Fuses & Fire Sparks */}
+                {room.players.length === 2 && room.gameState === "bomb_party_playing" && (
+                  <svg className="absolute left-0 w-full pointer-events-none z-15 -top-[78px] md:-top-[64px] h-[calc(100%+78px)] md:h-[calc(100%+64px)]" viewBox="0 0 400 320">
+                    {/* Left Fuse Burnt/Ash Trace */}
+                    {(() => {
+                      const p1Id = room.players[1]?.id;
+                      const p1Incorrect = room.bombParty?.stats?.[p1Id]?.incorrect || 0;
+                      return (
+                        <path
+                          d="M 200,78 q 0,-43 -62.2,10.7 q -31,32.3 -62,0 t -30.8,-53.7"
+                          fill="none"
+                          stroke="#374151"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeDasharray="2 3"
+                          className="opacity-40"
+                        />
+                      );
+                    })()}
+
+                    {/* Left Fuse Active (Unburnt rope) */}
+                    {(() => {
+                      const p1Id = room.players[1]?.id;
+                      const p1Incorrect = room.bombParty?.stats?.[p1Id]?.incorrect || 0;
+                      const t1 = Math.min(1.0, p1Incorrect * 0.1);
+                      return (
+                        <path
+                          d="M 200,78 q 0,-43 -62.2,10.7 q -31,32.3 -62,0 t -30.8,-53.7"
+                          fill="none"
+                          stroke="#d97706"
+                          strokeWidth="3.5"
+                          strokeLinecap="round"
+                          pathLength={100}
+                          strokeDasharray={`${((1 - t1) * 100).toFixed(2)} ${(t1 * 100).toFixed(2)}`}
+                          className="opacity-90"
+                        />
+                      );
+                    })()}
+
+                    {/* Right Fuse Burnt/Ash Trace */}
+                    {(() => {
+                      const p0Id = room.players[0]?.id;
+                      const p0Incorrect = room.bombParty?.stats?.[p0Id]?.incorrect || 0;
+                      return (
+                        <path
+                          d="M 200,78 q 0,-43 62.2,10.7 q 31,32.3 62,0 t 30.8,-53.7"
+                          fill="none"
+                          stroke="#374151"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeDasharray="2 3"
+                          className="opacity-40"
+                        />
+                      );
+                    })()}
+
+                    {/* Right Fuse Active (Unburnt rope) */}
+                    {(() => {
+                      const p0Id = room.players[0]?.id;
+                      const p0Incorrect = room.bombParty?.stats?.[p0Id]?.incorrect || 0;
+                      const t0 = Math.min(1.0, p0Incorrect * 0.1);
+                      return (
+                        <path
+                          d="M 200,78 q 0,-43 62.2,10.7 q 31,32.3 62,0 t 30.8,-53.7"
+                          fill="none"
+                          stroke="#d97706"
+                          strokeWidth="3.5"
+                          strokeLinecap="round"
+                          pathLength={100}
+                          strokeDasharray={`${((1 - t0) * 100).toFixed(2)} ${(t0 * 100).toFixed(2)}`}
+                          className="opacity-90"
+                        />
+                      );
+                    })()}
+
+                    {/* Left Spark (Fiery rotating & vibrating star) */}
+                    {(() => {
+                      const p1Id = room.players[1]?.id;
+                      const p1Incorrect = room.bombParty?.stats?.[p1Id]?.incorrect || 0;
+                      const t1 = Math.min(1.0, p1Incorrect * 0.1);
+                      const pt = getThreeSegmentBezierPoint(1 - t1, true);
+                      return (
+                        <motion.g
+                          animate={{
+                            x: [pt.x - 2, pt.x + 2, pt.x - 1, pt.x + 1, pt.x],
+                            y: [pt.y + 1, pt.y - 1, pt.y + 2, pt.y - 2, pt.y],
+                            scale: [1, 1.15, 0.9, 1.1, 0.95, 1],
+                            rotate: [0, 90, 180, 270, 360]
+                          }}
+                          transition={{
+                            repeat: Infinity,
+                            duration: 0.25,
+                            ease: "linear"
+                          }}
+                        >
+                          <path d={getStarburstPath(0, 0, 7, 16, 6)} fill="#ef4444" className="blur-[0.5px]" />
+                          <path d={getStarburstPath(0, 0, 7, 11, 4.5)} fill="#f97316" />
+                          <path d={getStarburstPath(0, 0, 7, 6, 2.5)} fill="#facc15" />
+                          <circle cx="0" cy="0" r="1.5" fill="#ffffff" />
+                        </motion.g>
+                      );
+                    })()}
+
+                    {/* Right Spark (Fiery rotating & vibrating star) */}
+                    {(() => {
+                      const p0Id = room.players[0]?.id;
+                      const p0Incorrect = room.bombParty?.stats?.[p0Id]?.incorrect || 0;
+                      const t0 = Math.min(1.0, p0Incorrect * 0.1);
+                      const pt = getThreeSegmentBezierPoint(1 - t0, false);
+                      return (
+                        <motion.g
+                          animate={{
+                            x: [pt.x - 2, pt.x + 2, pt.x - 1, pt.x + 1, pt.x],
+                            y: [pt.y + 1, pt.y - 1, pt.y + 2, pt.y - 2, pt.y],
+                            scale: [1, 1.15, 0.9, 1.1, 0.95, 1],
+                            rotate: [0, 90, 180, 270, 360]
+                          }}
+                          transition={{
+                            repeat: Infinity,
+                            duration: 0.25,
+                            ease: "linear"
+                          }}
+                        >
+                          <path d={getStarburstPath(0, 0, 7, 16, 6)} fill="#ef4444" className="blur-[0.5px]" />
+                          <path d={getStarburstPath(0, 0, 7, 11, 4.5)} fill="#f97316" />
+                          <path d={getStarburstPath(0, 0, 7, 6, 2.5)} fill="#facc15" />
+                          <circle cx="0" cy="0" r="1.5" fill="#ffffff" />
+                        </motion.g>
+                      );
+                    })()}
+                  </svg>
+                )}
+
+                {room.gameState === "bomb_party_setup" && (
+                  <div className="flex-1 flex flex-col items-center justify-center py-4 px-4 text-center space-y-6">
+                    <motion.div
+                      animate={{ scale: [1, 1.05, 1] }}
+                      transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
+                      className="text-6xl md:text-7xl"
+                    >
+                      💣
+                    </motion.div>
+                    
+                    <div className="space-y-2">
+                      <h3 className="text-xl md:text-2xl font-black text-black">جاهز تبدأ اللعبة؟</h3>
+                      <p className="text-xs md:text-sm font-bold text-gray-500 max-w-xs mx-auto">
+                        القنبلة على وشك الاشتعال!
+                      </p>
+                      <p className="text-xs md:text-sm font-black text-gray-700 max-w-xs mx-auto">
+                       لازم تخمن كلمة بسرعة من الحروف اللي هتظهر قدامك قبل ما القنبلة تفرقع في وشك 😂!
+                      </p>
+                    </div>
+
+                    <button
+                      disabled={((room.adPausedPlayersArray?.length || 0) > 0)}
+                      onClick={() => {
+                        playSound("clickOpen");
+                        socket?.emit("start_bomb_party", { roomId: room.id });
+                        GameEngineService.handleAction("start_bomb_party", { roomId: room.id, playerId: socket?.id });
+                      }}
+                      className={`w-full max-w-xs ${
+                        ((room.adPausedPlayersArray?.length || 0) > 0)
+                          ? "bg-gray-300 border-gray-400 text-gray-500 shadow-none cursor-not-allowed"
+                          : "bg-red-500 hover:bg-red-600 border-red-600 shadow-[0_6px_0_0_#b91c1c] active:shadow-none active:translate-y-1.5"
+                      } border-[6px] text-white font-black text-x1 md:text-xl py-2.5 px-2 rounded-2xl transition-all flex justify-center items-center gap-2 relative overflow-hidden group`}
+                    >
+                      {((room.adPausedPlayersArray?.length || 0) > 0) ? "انتظر! المنافس يشاهد إعلان 📺" : "ولع الفتيل🔥, وابدأ التخمين"}
+                    </button>
+                  </div>
+                )}
+
+                {room.gameState === "bomb_party_playing" && (
+                  <div className="flex-1 flex flex-col items-center justify-center relative min-h-[220px]">
+                    {/* Background Overlays for Active Player Turns (smooth transitions) */}
+                    <div 
+                      className={`absolute left-0 top-0 bottom-0 w-1/2 transition-colors duration-500 z-0
+                        ${room.bombParty?.turnPlayerId === room.players[1]?.id ? 'bg-blue-500/10' : 'bg-transparent'}
+                      `}
+                    />
+                    <div 
+                      className={`absolute right-0 top-0 bottom-0 w-1/2 transition-colors duration-500 z-0
+                        ${room.bombParty?.turnPlayerId === room.players[0]?.id ? 'bg-green-500/10' : 'bg-transparent'}
+                      `}
+                    />
+
+                    
+                    <div className="relative flex flex-col items-center">
+                      
+                      {/* Bomb Container with integrated Arrow */}
+                      <div className="relative flex items-center justify-center pt-12 w-42 h-42">
+                        {/* 45 Degree Arrow Centered at the Bomb pointing to the active player - enlarged and offset for perfect visibility */}
+                        <motion.div
+                          className="absolute pointer-events-none z-5"
+                          animate={{
+                            rotate: room.bombParty?.turnPlayerId === room.players[1]?.id ? -45 : 45,
+                          }}
+                          transition={{
+                            type: "spring",
+                            stiffness: 100,
+                            damping: 14
+                          }}
+                          style={{
+                            width: "250px",
+                            height: "250px",
+                            transformOrigin: "center center"
+                          }}
+                        >
+                          <svg viewBox="0 0 100 150" fill="none" className="w-full h-full text-red-500">
+                            {/* Arrow Head */}
+                            <path d="M38 14 L50 1 L62 14 Z" fill="currentColor" />
+                            {/* Arrow Shaft (Longer Stem) */}
+                            <polygon points="48,50 52,50 54,14 46,14" fill="currentColor" />
+                            {/* Pivot Circle */}
+                            <circle cx="50" cy="50" r="6" fill="currentColor" />
+                          </svg>
+                        </motion.div>
+                        
+                        {/* Pulsing Bomb Sphere with zero shadows and real-time accelerating CSS pulse */}
+                        <BombTimer room={room} />
+                      </div>
+
+                      <div className="mt-2 flex flex-col items-center gap-1">
+                        <span className="text-xs text-gray-500 font-bold">الحروف المطلوبة:</span>
+                        <span className="text-[12px] text-red-500 font-bold mb-1">خمن كلمة يكون فيها الحروف دي, بسرعة!</span>
+                        <div className="bg-red-500 text-white text-3xl font-black px-6 py-1.5 rounded-xl shadow-[0_0_15px_rgba(239,68,68,0.5)] tracking-widest min-w-[120px] text-center">
+                          {room.bombParty?.currentSubstring}
+                        </div>
+                      </div>
+
+                      <BombPartyControls room={room} socket={socket} />
+                    </div>
+                  </div>
+                )}
+
+                {room.gameState === "bomb_party_finished" && (
+                  <div className="flex-1 flex flex-col items-center justify-center p-2 relative">
+                    {bombExplosionFrame !== null && (
+                      <div className="fixed inset-0 z-[9999] flex items-center justify-center pointer-events-none overflow-hidden bg-transparent">
+                        <motion.div
+                          initial={{ scale: 0.1, opacity: 0 }}
+                          animate={{ 
+                            scale: [0.1, 1.2, 2.5, 3.8], 
+                            opacity: [0, 1, 1, 0] 
+                          }}
+                          transition={{ duration: 0.9, ease: "easeOut" }}
+                          className="flex items-center justify-center bg-transparent"
+                        >
+                          <img
+                            src={`/bomb-explosion/bomb-explosion-${bombExplosionFrame}.png`}
+                            alt="bomb explosion"
+                            className="w-[85vw] h-[85vw] md:w-[65vw] md:h-[65vw] max-w-[950px] max-h-[950px] object-contain bg-transparent"
+                          />
+                        </motion.div>
+                      </div>
+                    )}
+                    <h2 className="text-xl font-black text-gray-600 mb-2">انتهي وقت القنبلة!</h2>
+                    <div className="text-xl md:text-2xl font-bold text-blue-700 mb-2">
+                      الفائز: {room.bombParty?.matchWinnerId ? (room.players.find((p: any) => p.id === room.bombParty.matchWinnerId)?.name || "اللاعب") : "تعادل"}
+                    </div>
+
+                    {/* Arabic Comic End Game Status Messages */}
+                    {(() => {
+                      const winnerId = room.bombParty?.matchWinnerId;
+                      const isDraw = !winnerId;
+                      const isMeWinner = winnerId === socket?.id;
+
+                      let comicMsg = "";
+                      let msgColor = "";
+
+                      if (isDraw) {
+                        comicMsg = "🤝 تعادل! ولا حد فيكم قدر يغلب التاني!";
+                        msgColor = "text-yellow-500";
+                      } else if (isMeWinner) {
+                        comicMsg = "🥳 مبروك لحقت نفسك وكسبت المباراة!";
+                        msgColor = "text-green-600";
+                      } else {
+                        comicMsg = "💥 القنبلة فرقعت في وشك وخسرت المباراة!";
+                        msgColor = "text-red-500";
+                      }
+
+                      return (
+                        <p className={`text-xs md:text-sm font-black ${msgColor} text-center max-w-sm px-4 mb-1 leading-relaxed`}>
+                          {comicMsg}
+                        </p>
+                      );
+                    })()}
+
+                    {/* Stats Table for Correct/Incorrect answers */}
+                    <div className="bg-gray-800/80 border border-gray-700 p-2 rounded-2xl w-full max-w-sm mb-3 space-y-3 shadow-md">
+                      <div className="grid grid-cols-2 gap-3" dir="rtl">
+                        {room.players.map((p: any) => {
+                          const pStats = room.bombParty?.stats?.[p.id] || { correct: 0, incorrect: 0 };
+                          return (
+                            <div key={p.id} className="bg-gray-900/50 p-3 rounded-xl border border-gray-700 flex flex-col items-center">
+                              <span className="text-xs text-gray-200 font-extrabold mb-1.5 truncate max-w-[120px]">{p.name || "اللاعب"}</span>
+                              <div className="flex flex-col gap-1 text-[11px] text-center font-bold">
+                                <span className="text-green-400">✅ {pStats.correct || 0} صح</span>
+                                <span className="text-red-400">❌ {pStats.incorrect || 0} خطأ</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    
+                    <div className="w-full mt-auto">
+                      <GameEndControls
+                        room={room}
+                        socket={socket}
+                        myId={socket?.id}
+                        playerSerial={playerSerial}
+                        rematchLabel="🔄 لعب مرة أخري"
+                        onRematch={() => {
+                          socket?.emit("request_bomb_party_rematch", { roomId: room.id });
+                          GameEngineService.handleAction("request_bomb_party_rematch", { roomId: room.id, playerId: socket?.id });
+                        }}
+                        onLeaveGame={handleLeaveGame}
+                        playSound={playSound}
+                      />
+                    </div>
+                  </div>
+                )}
+                </div>
+                </div>
+                <div className={room.gameState === "bomb_party_playing" ? "hidden md:block w-full" : "w-full"}>
+                  <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
+                </div>
+              </React.Fragment>
+
+            ) : room.gameState === "xo_playing" || room.gameState === "xo_finished" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                {renderXORewardBar()}
+                {room.players.length === 2 && (
+                  <div className="flex justify-between items-center w-full mb-1 px-1">
+                    <div className="flex flex-col items-center bg-white border-2 border-red-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                      <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                        {(room.players.find(p => p.id === room.xoXPlayer)?.name || "اللاعب X").substring(0, 5)}
+                        <span className="text-red-500 font-black text-base">✖</span>
+                      </span>
+                      <span className="text-sm font-black text-red-500">🏆 {room.players.find(p => p.id === room.xoXPlayer)?.xoWins || 0}</span>
+                    </div>
+
+                    <div className={`flex justify-center items-center gap-1 mx-2 ${room.gameState !== "xo_finished" ? "border-2 border-green-200 px-3 py-1 rounded-xl shadow-sm min-w-[70px]" : "font-black text-lg text-brown-dark"}`} dir="ltr">
+                        {room.gameState === "xo_finished" ? (
+                           <span>انتهت المباراة</span>
+                        ) : (
+                           <span className={`text-2xl font-black font-mono tracking-wider ${room.timer <= 60 ? "text-red-600" : "text-gray-700"}`}>
+                             {Math.floor(room.timer / 60)}:{(room.timer % 60).toString().padStart(2, "0")}
+                           </span>
+                        )}
+                    </div>
+
+                    <div className="flex flex-col items-center bg-white border-2 border-green-200 px-3 py-0.5 rounded-xl shadow-sm min-w-[70px]" dir="rtl">
+                      <span className="text-[10px] md:text-xs font-black text-gray-500 max-w-[80px] break-words text-center flex items-center justify-center gap-1">
+                        {(room.players.find(p => p.id === room.xoOPlayer)?.name || "اللاعب O").substring(0, 5)}
+                        <span className="text-green-600 font-black text-base">◯</span>
+                      </span>
+                      <span className="text-sm font-black text-green-600">🏆 {room.players.find(p => p.id === room.xoOPlayer)?.xoWins || 0}</span>
+                    </div>
+                  </div>
+                )}
+                
+                <div className="text-center mb-1 px-2 mt-1">
+                  <p className="text-xs md:text-sm font-bold text-blue-600 bg-blue-50 p-2 rounded-xl border border-blue-100 w-fit mx-auto shadow-sm">
+                    المستوي {room.xoLevel || 1} - اجمع {room.xoWinLength || 3} رموز متتالية للفوز!
+                  </p>
+                </div>
+                <div className="flex justify-center my-2">
+                  <div 
+                    className="bg-gray-200 p-2 md:p-3 rounded-2xl w-full max-w-[360px] mx-auto shadow-inner border-4 border-gray-300"
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: `repeat(${room.xoBoardSize || 3}, minmax(0, 1fr))`,
+                      gap: (room.xoBoardSize || 3) > 6 ? '2px' : (room.xoBoardSize || 3) > 4 ? '4px' : '8px'
+                    }}
+                  >
+                    {room.xoBoard?.map((cell, idx) => {
+                      const isWinningCell = room.xoWinningLine?.includes(idx);
+                      const myTurn = room.xoTurn === socket?.id && room.gameState === "xo_playing";
+                      const sizeClass = (room.xoBoardSize || 3) <= 4 ? "text-5xl md:text-6xl p-2" : (room.xoBoardSize || 3) <= 6 ? "text-3xl md:text-4xl p-1" : (room.xoBoardSize || 3) <= 8 ? "text-2xl md:text-3xl p-1" : "text-xl md:text-2xl p-0.5";
+                      return (
+                        <button
+                          key={idx}
+                          disabled={!myTurn || cell !== null}
+                          onClick={() => {
+                             socket?.emit("submit_xo_move", { roomId: room.id, index: idx });
+                             GameEngineService.handleAction("submit_xo_move", { roomId: room.id, index: idx, playerId: socket?.id });
+                             playSound("clickOpen");
+                             setRoom(prev => {
+                               if (!prev || !prev.xoBoard) return prev;
+                               const newBoard = [...prev.xoBoard];
+                               newBoard[idx] = prev.xoXPlayer === socket?.id ? "X" : "O";
+                               return {
+                                 ...prev,
+                                 xoBoard: newBoard,
+                                 xoTurn: prev.players.find((p: any) => p.id !== socket?.id)?.id || null
+                               };
+                             });
+                          }}
+                          className={`aspect-square flex items-center justify-center font-black rounded-[20%] transition-transform duration-75 transform ${sizeClass}
+                            ${cell === null ? "bg-white hover:bg-gray-50 cursor-pointer shadow-sm" : cell === "X" ? "bg-red-50 text-red-500 shadow-sm" : "bg-green-50 text-green-600 shadow-sm"}
+                            ${isWinningCell ? "bg-yellow-200 ring-4 ring-yellow-400 scale-105 z-10 animate-bounce" : ""}
+                            ${myTurn && cell === null ? "hover:scale-105 hover:shadow-md ring-2 ring-transparent hover:ring-blue-300" : cell !== null ? "" : "cursor-default opacity-80"}
+                          `}
+                        >
+                           {cell === "X" ? "✖" : cell === "O" ? "◯" : ""}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {room.gameState === "xo_playing" && (
+                   <div className="text-center my-2 font-bold text-base md:text-lg mb-2">
+                      {room.xoTurn === socket?.id ? (
+                         <span key="xo-turn-mine" className="text-blue-600 animate-pulse bg-blue-50 px-4 py-1 rounded-full border border-blue-200">دورك الآن للعب! 🎮</span>
+                      ) : (
+                         <span key="xo-turn-opponent" className="text-gray-500 bg-gray-50 px-4 py-1 rounded-full border border-gray-200">في انتظار الخصم أن يلعب... ⏳</span>
+                      )}
+                   </div>
+                )}
+
+                {room.gameState === "xo_finished" && (
+                   <div className="flex flex-col gap-1 mt-1 animate-in fade-in slide-in-from-bottom-4">
+                     {room.xoLevel === 8 ? (
+                       <div className="text-sm md:text-lg font-black p-1 rounded-2xl border-4 bg-white mx-2 flex flex-col items-center">
+                         {(() => {
+                            const p1 = room.players[0] || { id: "p1", name: "لاعب 1", avatar: "👤" };
+                            const p2 = room.players[1] || { id: "p2", name: "لاعب 2", avatar: "👤" };
+                            const p1Wins = room.xoMatchWins?.[p1.id] || 0;
+                            const p2Wins = room.xoMatchWins?.[p2.id] || 0;
+                            const isP1Winner = p1Wins > p2Wins;
+                            const isP2Winner = p2Wins > p1Wins;
+                            const isDraw = p1Wins === p2Wins;
+
+                            const me = room.players.find(p => p.id === socket?.id);
+                            
+                            let resultMessage = "";
+                            if (isDraw) resultMessage = "النتيجة النهائية تعادل! 🤝";
+                            else if ((isP1Winner && me?.id === p1.id) || (isP2Winner && me?.id === p2.id)) resultMessage = "لقد فزت بالمباراة! 🎉";
+                            else resultMessage = "لقد خسرت المباراة! 😔";
+                            
+                            return (
+                              <>
+                                <span className={`whitespace-pre-wrap ${isDraw ? "text-gray-600" : ((isP1Winner && me?.id === p1.id) || (isP2Winner && me?.id === p2.id)) ? "text-green-500" : "text-red-500"}`}>{resultMessage}</span>
+                                <div className="flex justify-around w-full mt-1 bg-gray-300 rounded-xl p-2 border">
+                                  <div className="flex flex-col items-center gap-1 w-1/2">
+                                    <span className="text-lg">{p1.name} {isP1Winner ? "😁" : (isDraw ? "🤝" : "🥺")}</span>
+                                    <span className="text-2xl text-blue-600">{p1Wins}</span>
+                                  </div>
+                                  <div className="flex flex-col items-center gap-1 border-r border-gray-300 w-1/2">
+                                    <span className="text-lg">{p2.name} {isP2Winner ? "😁" : (isDraw ? "🤝" : "🥺")}</span>
+                                    <span className="text-2xl text-blue-600">{p2Wins}</span>
+                                  </div>
+                                </div>
+                              </>
+                            );
+                         })()}
+                       </div>
+                     ) : (
+                     <div className="text-sm md:text-lg font-black p-1 rounded-2xl border-4 bg-white mx-2">
+                        {room.xoWinner === "draw" ? (
+                           <span className="text-gray-600 whitespace-pre-wrap">تعادل! 🤝{"\n"}لا يوجد فائز هذه المرة</span>
+                        ) : room.xoWinner === socket?.id ? (
+                           <span className="text-green-500 whitespace-pre-wrap">لقد فزت! 🎉{"\n"}لعب رائع وذكي!</span>
+                        ) : (
+                           <span className="text-red-500 whitespace-pre-wrap">حظ أوفر المرة القادمة! 😔{"\n"}تعلم من أخطائك</span>
+                        )}
+                     </div>
+                     )}
+                     <div className="w-full px-2 pb-2">
+                       <GameEndControls
+                         room={room}
+                         socket={socket}
+                         myId={socket?.id}
+                         playerSerial={playerSerial}
+                         rematchLabel={(room.xoLevel || 1) < 8 ? `انتقل الي المستوي ${(room.xoLevel || 1) + 1}` : "لعب مرة أخري!"}
+                         onRematch={() => {
+                           socket?.emit("restart_xo", { roomId: room.id });
+                           GameEngineService.handleAction("restart_xo", { roomId: room.id, playerId: socket?.id });
+                         }}
+                         onLeaveGame={handleLeaveGame}
+                         playSound={playSound}
+                       />
+                     </div>
+                   </div>
+                )}
+                </div>
+                <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
+              </React.Fragment>
+            ) : room.gameState === "hand_playing" || room.gameState === "hand_finished" ? (
+              <React.Fragment>
+                <div className="w-full card-game p-2 md:p-3 text-center space-y-2 md:space-y-3 relative overflow-hidden flex flex-col min-h-[auto]">
+                  {renderHandRewardBar()}
+                  {renderHandGame()}
+                </div>
+              </React.Fragment>
+            
+            ) : room.gameState === "connect_four_words_setup" || room.gameState === "connect_four_words_playing" || room.gameState === "connect_four_words_finished" ? (
+              <ConnectFourWordsGame
+                room={room}
+                socket={socket}
+                playerSerial={playerSerial}
+                isAdmin={isAdmin}
+                hasProPackage={hasProPackage}
+                CategoryPageAd={CategoryPageAd}
+                renderConnectFourWordsRewardBar={renderConnectFourWordsRewardBar}
+                playSound={playSound}
+                handleLeaveGame={handleLeaveGame}
+              />
+
+
+            ) : room.gameState === "beach_race_setup" || room.gameState === "beach_race_playing" || room.gameState === "beach_race_finished" ? (
+              <BeachRaceGame
+                room={room}
+                socket={socket}
+                playerSerial={playerSerial}
+                isAdmin={isAdmin}
+                hasProPackage={hasProPackage}
+                CategoryPageAd={CategoryPageAd}
+                playSound={playSound}
+                handleLeaveGame={handleLeaveGame}
+                showAlert={showAlert}
+                showConfirm={showConfirm}
+                showAd={showAd}
+                renderRewardBar={renderBeachRaceRewardBar}
+              />
+            ) : room.gameState === "puzzle_setup" || room.gameState === "puzzle_playing" || room.gameState === "puzzle_finished" ? (
+              <PuzzleGame
+                room={room}
+                socket={socket}
+                playerSerial={playerSerial}
+                isAdmin={isAdmin}
+                playSound={playSound}
+                stopSound={stopSound}
+                handleLeaveGame={handleLeaveGame}
+                showAlert={showAlert}
+                showConfirm={showConfirm}
+                showAd={showAd}
+                renderPuzzleRewardBar={renderPuzzleRewardBar}
+              />
+            ) : room.gameState === "wordle_setup" || room.gameState === "wordle_playing" || room.gameState === "wordle_finished" ? (
+              <WordleGame
+                room={room}
+                socket={socket}
+                playerSerial={playerSerial}
+                isAdmin={isAdmin}
+                hasProPackage={hasProPackage}
+                CategoryPageAd={CategoryPageAd}
+                renderWordleRewardBar={renderWordleRewardBar}
+                playSound={playSound}
+                handleLeaveGame={handleLeaveGame}
+                showAlert={showAlert}
+                showConfirm={showConfirm}
+                showAd={showAd}
+              />
+            ) : room.gameState === "space_war_setup" || room.gameState === "space_war_playing" || room.gameState === "space_war_finished" ? (
+              <SpaceWarGame
+                room={room}
+                socket={socket}
+                playerSerial={playerSerial}
+                isAdmin={isAdmin}
+                hasProPackage={hasProPackage}
+                CategoryPageAd={CategoryPageAd}
+                playSound={playSound}
+                handleLeaveGame={handleLeaveGame}
+                showAd={showAd}
+                showAlert={showAlert}
+                renderSpaceWarRewardBar={renderSpaceWarRewardBar}
+              />
             ) : room.gameState === "waiting" ? (
               <React.Fragment>
                 <div className="w-full card-game p-3 md:p-3 text-center space-y-3 md:space-y-5 relative overflow-hidden">
@@ -23083,7 +27647,7 @@ export default function App() {
                     >
                       {room.players.length < 2
                         ? "بانتظار المنافس..."
-                        : isPrivate && !room.selectionMode
+                        : !room.selectionMode
                           ? "اختاروا هتلعبوا ايه بسرعة!"
                           : "اتفقوا على فئة التخمين للبدء!"}
                     </h2>
@@ -23101,9 +27665,15 @@ export default function App() {
                     </div>
                   </div>
 
+                  {isOpponentWatchingAdInRoom(room, socket?.id, playerSerial) && (
+                    <div className="bg-yellow-50 border border-yellow-200 text-yellow-700 text-xs font-bold p-2 rounded-xl mb-3 flex items-center justify-center gap-1 animate-pulse">
+                      انتظر قليلا! اللاعب ({room.players?.find((p: any) => room.adPausedPlayersArray?.includes(p.id))?.name || "الآخر"}) يشاهد إعلان قصير 📺
+                    </div>
+                  )}
+
                   <div className="space-y-4">
                     {isPrivate && room.players.length < 2 && (
-                      <div className="bg-blue-50 border-2 border-blue-200 p-3 py-0.5 mb-2 shadow-sm rounded-2xl text-accent-blue font-black text-sm md:text-base">
+                      <div className="bg-blue-50 border-2 border-blue-200 p-3 py-0.5 mb-1 shadow-sm rounded-2xl text-accent-blue font-black text-sm md:text-base">
                         ابعت كود الغرفة
                         <div className="relative inline-block">
                           <AnimatePresence>
@@ -23138,70 +27708,414 @@ export default function App() {
                       </div>
                     )}
                     <div className="space-y-6">
-                      {isPrivate &&
-                      (!room.selectionMode || room.selectionMode === null) ? (
-                        <div className="flex flex-col gap-2 animate-in fade-in slide-in-from-bottom-4 pt-1">
-                          {room.players.length < 2 && (
-                            <div className="flex flex-col items-center justify-center p-3 bg-gray-50 border-2 border-dashed border-gray-300 rounded-2xl">
-                              <Loader2 className="w-8 h-8 animate-spin text-purple-500 mb-2" />
-                              <h3 className="font-black text-brown-dark text-lg">
-                                في انتظار اللاعب الثاني...
-                              </h3>
-                              <p className="text-sm text-brown-muted font-bold text-center">
-                                تقدر تختار طريقة اللعب أول ما اللاعب التاني يدخل
-                                🤪
-                              </p>
+                      {(!room.selectionMode || room.selectionMode === null) ? (
+                        <div className="flex flex-col gap-3 animate-in fade-in slide-in-from-bottom-4 pt-1">
+                          <div className="text-center">
+                            <h3 className="box-game p-1 font-black text-accent-orange text-1xl md:text-2xl drop-shadow-sm">
+                              ألعاب خمن تخمينة
+                            </h3>
+                          </div>
+                          
+                          <div className="grid grid-cols-4 gap-1 md:gap-2">
+
+                            <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("ready")
+                              }
+                              className={`h-full w-full bg-orange-100 hover:bg-orange-200 border-[3px] border-accent-orange p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#ea580c] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <span
+                                className={`text-3xl md:text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
+                              >
+                                🖼️
+                              </span>
+                              <span className="text-[13px] md:text-lg font-black text-accent-orange text-center leading-tight">
+                                فئات جاهزة
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "ready" && oppMode === "ready") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "ready") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "ready") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          {isPrivate && (
+                            <div className="relative">
+                              <button
+                                disabled={room.players.length < 2}
+                                onClick={() =>
+                                  handleProposeMode("custom")
+                                }
+                                className={`h-full w-full bg-purple-100 hover:bg-purple-200 border-[3px] border-purple-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#7e22ce] active:shadow-none active:translate-y-1.5"}`}
+                              >
+                                <span
+                                  className={`text-3xl md:text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
+                                >
+                                  📸
+                                </span>
+                                <span className="text-[13px] md:text-lg font-black text-purple-600 text-center leading-tight">
+                                  ارفع صورة
+                                </span>
+                              </button>
+                              {(() => {
+                                const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                                const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                                if (meMode === "custom" && oppMode === "custom") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                                if (meMode === "custom") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                                if (oppMode === "custom") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                                return null;
+                              })()}
                             </div>
                           )}
-                          <button
-                            disabled={room.players.length < 2}
-                            onClick={() =>
-                              socket?.emit("select_private_mode", {
-                                roomId: room.id,
-                                mode: "ready",
-                              })
-                            }
-                            className={`bg-orange-100 hover:bg-orange-200 border-4 border-accent-orange p-3 rounded-3xl transition-all flex flex-col items-center gap-2 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_8px_0_0_#ea580c] active:shadow-none active:translate-y-2"}`}
-                          >
-                            <span
-                              className={`text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
-                            >
-                              😉
-                            </span>
-                            <span className="text-xl font-black text-accent-orange">
-                              فئات جاهزة للتخمين
-                            </span>
-                            <span className="text-xs text-brown-muted">
-                              (مبتدئين، أبطال، محترفين...)
-                            </span>
-                          </button>
 
-                          <button
-                            disabled={room.players.length < 2}
-                            onClick={() =>
-                              socket?.emit("select_private_mode", {
-                                roomId: room.id,
-                                mode: "custom",
-                              })
-                            }
-                            className={`bg-purple-100 hover:bg-purple-200 border-4 border-purple-500 p-3 rounded-3xl transition-all flex flex-col items-center gap-2 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_8px_0_0_#7e22ce] active:shadow-none active:translate-y-2"}`}
-                          >
-                            <span
-                              className={`text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
+                          
+                          {/* Beach Race Game */}
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("beach_race")
+                              }
+                              className={`h-full w-full bg-amber-100 hover:bg-amber-200 border-[3px] border-amber-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#f59e0b] active:shadow-none active:translate-y-1.5"}`}
                             >
-                              😎
-                            </span>
-                            <span className="text-xl font-black text-purple-600">
-                              ارفع صورة يخمنها
-                            </span>
-                            <span className="text-xs text-brown-muted">
-                              (كل لاعب يرفع صورة للتاني يخمنها)
-                            </span>
-                          </button>
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <span className="text-3xl md:text-4xl drop-shadow-md">🐇</span>
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-amber-800 text-center leading-tight">
+                                سباق التخمين
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "beach_race" && oppMode === "beach_race") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "beach_race") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "beach_race") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          {/* Puzzle Game */}
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("puzzle")
+                              }
+                              className={`h-full w-full bg-indigo-100 hover:bg-indigo-200 border-[3px] border-indigo-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#6366f1] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <span className="text-3xl md:text-4xl drop-shadow-md">🧩</span>
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-indigo-700 text-center leading-tight">
+                                تخمينة Puzzle
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "puzzle" && oppMode === "puzzle") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "puzzle") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "puzzle") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          {/* Wordle Game */}
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("wordle")
+                              }
+                              className={`h-full w-full bg-emerald-100 hover:bg-emerald-200 border-[3px] border-emerald-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#10b981] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <img src="/word-le-logo.png" className="w-8 h-8 md:w-10 md:h-10 object-contain drop-shadow-md" alt="wordle" />
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-emerald-700 text-center leading-tight">
+                                تخمينة كلمة
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "wordle" && oppMode === "wordle") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "wordle") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "wordle") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("connect_four_words")
+                              }
+                              className={`h-full w-full bg-blue-100 hover:bg-blue-200 border-[3px] border-blue-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#3b82f6] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <img src="/connect-4-logo.png" className="w-8 h-8 md:w-10 md:h-10 object-contain drop-shadow-md" alt="connect_four_words" />
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-blue-700 text-center leading-tight">
+                                تخمينة 4 حروف
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "connect_four_words" && oppMode === "connect_four_words") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "connect_four_words") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "connect_four_words") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("space_war")
+                              }
+                              className={`h-full w-full bg-slate-800 hover:bg-slate-900 border-[3px] border-slate-600 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#475569] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <span className="text-3xl md:text-4xl drop-shadow-md">🚀</span>
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-slate-200 text-center leading-tight">
+                                حرب الفضاء
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "space_war" && oppMode === "space_war") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "space_war") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "space_war") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("bus_complete")
+                              }
+                              className={`h-full w-full bg-blue-100 hover:bg-blue-200 border-[3px] border-blue-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#3b82f6] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <span
+                                className={`text-3xl md:text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
+                              >
+                                🚌
+                              </span>
+                              <span className="text-[13px] md:text-lg font-black text-blue-600 text-center leading-tight">
+                                تخمينة كومبليت
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "bus_complete" && oppMode === "bus_complete") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "bus_complete") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "bus_complete") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+                          
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("xo")
+                              }
+                              className={`h-full w-full bg-green-100 hover:bg-green-200 border-[3px] border-green-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#22c55e] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-0.5 text-3xl md:text-4xl font-black ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`} dir="ltr">
+                                <span className="text-red-500">X</span>
+                                <span className="text-green-600">O</span>
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-green-700 text-center leading-tight">
+                               تخمينة XO
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "xo" && oppMode === "xo") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "xo") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "xo") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+                          
+                                                    <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("dots")
+                              }
+                              className={`h-full w-full bg-purple-100 hover:bg-purple-200 border-[3px] border-purple-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#a855f7] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <img src="/dots-and-boxes-logo.png" className="w-8 h-8 md:w-10 md:h-10 object-contain" alt="dots" />
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-purple-700 text-center leading-tight">
+                               نقطة وخط
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "dots" && oppMode === "dots") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "dots") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "dots") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("speed_cups")
+                              }
+                              className={`h-full w-full bg-pink-100 hover:bg-pink-200 border-[3px] border-pink-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#ec4899] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-1 items-center justify-center ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                <img src="/speed-cups/speed-cups-logo.png" className="w-8 h-8 md:w-10 md:h-10 object-contain drop-shadow-md" alt="speed cups" />
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-pink-700 text-center leading-tight">
+                               أكواب السرعة
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "speed_cups" && oppMode === "speed_cups") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "speed_cups") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "speed_cups") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("iq")
+                              }
+                              className={`h-full w-full bg-blue-100 hover:bg-blue-200 border-[3px] border-blue-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#3b82f6] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`flex gap-0.5 text-3xl md:text-4xl font-black ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`} dir="ltr">
+                                <span className="text-blue-500">I</span>
+                                <span className="text-blue-700">Q</span>
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-blue-700 text-center leading-tight">
+                               تخمينة IQ
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "iq" && oppMode === "iq") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "iq") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "iq") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+                          
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("hand_khamin")
+                              }
+                              className={`h-full w-full bg-pink-100 hover:bg-pink-200 border-[3px] border-pink-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#ec4899] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <div className={`text-3xl md:text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}>
+                                🖐
+                              </div>
+                              <span className="text-[13px] md:text-lg font-black text-pink-700 text-center leading-tight">
+                                تخمينة كف يد
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "hand_khamin" && oppMode === "hand_khamin") return <span className="absolute -top-3 -right-3 z-10 bg-pink-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "hand_khamin") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "hand_khamin") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+                          
+                          <div className="relative">
+                            <button
+                              disabled={room.players.length < 2}
+                              onClick={() =>
+                                handleProposeMode("bomb_party")
+                              }
+                              className={`h-full w-full bg-red-100 hover:bg-red-200 border-[3px] border-red-500 p-2 md:p-3 rounded-2xl transition-all flex flex-col items-center justify-center gap-1 group ${room.players.length < 2 ? "opacity-60 cursor-not-allowed shadow-none" : "shadow-[0_6px_0_0_#ef4444] active:shadow-none active:translate-y-1.5"}`}
+                            >
+                              <span
+                                className={`text-3xl md:text-4xl ${room.players.length >= 2 ? "group-hover:scale-110 transition-transform" : ""}`}
+                              >
+                                💣
+                              </span>
+                              <span className="text-[13px] md:text-lg font-black text-red-700 text-center leading-tight">
+                               قنبلة التخمين
+                              </span>
+                            </button>
+                            {(() => {
+                              const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                              const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                              if (meMode === "bomb_party" && oppMode === "bomb_party") return <span className="absolute -top-3 -right-3 z-10 bg-green-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md animate-bounce transform rotate-6">اتفقنا!</span>;
+                              if (meMode === "bomb_party") return <span className="absolute -top-3 -right-3 z-10 bg-yellow-400 border-2 border-white text-brown-dark text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6">مقترح!</span>;
+                              if (oppMode === "bomb_party") return <span className="absolute -top-3 -right-3 z-10 bg-red-500 border-2 border-white text-white text-[8px] md:text-xs font-bold px-1 md:px-2 py-1 md:py-1.5 rounded-full shadow-md transform rotate-6 animate-pulse">مقترح!</span>;
+                              return null;
+                            })()}
+                          </div>
+                          
+                          </div>
+                          
+                          {(() => {
+                             const meMode = room.players.find(p => p.id === socket?.id)?.selectedSelectionMode;
+                             const oppMode = room.players.find(p => p.id !== socket?.id)?.selectedSelectionMode;
+                             const isReady = !!(meMode && meMode === oppMode);
+                             return (
+                               <button
+                                 type="button"
+                                 disabled={!isReady}
+                                 onClick={() => {
+                                   if (isReady) {
+                                     playSound("clickOpen");
+                                     socket?.emit("confirm_selection_mode", { roomId });
+                                   }
+                                 }}
+                                 className={`mt-2 w-full text-white font-black text-xl md:text-2xl p-4 rounded-3xl transition-all flex justify-center items-center gap-3 relative overflow-hidden group ${
+                                   isReady
+                                     ? "bg-green-500 hover:bg-green-600 border-[6px] border-green-600 shadow-[0_8px_0_0_#16a34a] active:shadow-none active:translate-y-2 cursor-pointer"
+                                     : "bg-gray-400 border-[6px] border-gray-500 opacity-70 cursor-not-allowed shadow-none"
+                                 }`}
+                               >
+                                 احنا جاهزين 🕹️
+                               </button>
+                             );
+                          })()}
                         </div>
                       ) : !hasWatchedCategoryAd &&
                         room.players.length >= 2 &&
-                        (room.selectionMode === "ready" || !isPrivate) ? (
+                        room.selectionMode === "ready" ? (
                         <div className="flex flex-col items-center justify-center p-6 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-300">
                           {isWatchingCategoryAd ? (
                             <div className="text-center space-y-3">
@@ -23252,6 +28166,12 @@ export default function App() {
                                     roomId,
                                     category: null,
                                     level: "مستوي مبتدئين التخمين",
+                                  });
+                                  GameEngineService.handleAction("select_category", {
+                                    roomId,
+                                    category: null,
+                                    level: "مستوي مبتدئين التخمين",
+                                    playerId: socket?.id,
                                   });
                                 }
                               }}
@@ -23371,13 +28291,19 @@ export default function App() {
                                   return (
                                     <button
                                       key={cat.id}
-                                      onClick={() =>
+                                      onClick={() => {
                                         socket?.emit("select_category", {
                                           roomId,
                                           category: cat.id,
                                           level: "مستوي مبتدئين التخمين",
-                                        })
-                                      }
+                                        });
+                                        GameEngineService.handleAction("select_category", {
+                                          roomId,
+                                          category: cat.id,
+                                          level: "مستوي مبتدئين التخمين",
+                                          playerId: socket?.id,
+                                        });
+                                      }}
                                       className={`p-2 rounded-xl flex flex-col items-center gap-1 transition-all border-b-4 active:border-b-0 active:translate-y-1 relative
                                     ${isAgreed ? "bg-green-100 text-accent-green border-green-400 scale-105 ring-2 ring-green-400 ring-offset-2" : isMyChoice ? "bg-orange-100 text-accent-orange border-orange-300 scale-105" : isNew ? "bg-yellow-50 text-yellow-700 border-yellow-400 ring-2 ring-yellow-400 ring-offset-1 hover:bg-yellow-100" : "bg-gray-100 text-brown-muted border-gray-300 hover:bg-gray-200 hover:text-brown-dark"}
                                     ${isOpponentChoice && !isMyChoice ? "hint-glow" : ""}
@@ -23473,6 +28399,29 @@ export default function App() {
                           )}
                         </>
                       )}
+
+                      {/* Toggle for disabling guess chat on category selection page */}
+                      {room.selectionMode === "ready" && (
+                        <div className="flex items-center justify-between bg-purple-50/80 p-1 border-2 border-purple-100 mt-1 shadow-sm">
+                          <div className="flex items-center gap-2 flex-row-reverse">
+                            <div className="w-8 h-8 bg-purple-500 rounded-xl flex items-center justify-center text-white shadow-sm border-2 border-black shrink-0">
+                              <Lock className="w-4 h-4" />
+                            </div>
+                            <span className="text-xs md:text-sm font-black text-brown-muted">
+                              منع شات الدردشة
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={toggleDisableGuessChat}
+                            className={`w-12 h-6 rounded-full border-2 border-black transition-all relative shrink-0 ${disableGuessChat ? "bg-accent-green" : "bg-gray-300"}`}
+                          >
+                            <div
+                              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white border-2 border-black transition-all ${disableGuessChat ? "right-0.5" : "left-0.5"}`}
+                            ></div>
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Standard Unified Chat Box - Used in choice phase */}
@@ -23510,7 +28459,7 @@ export default function App() {
                                     <div
                                       className={`leading-tight whitespace-pre-wrap ${msg.senderId === socket?.id ? "text-right" : "text-left"}`}
                                     >
-                                      {msg.text}
+                                      {msg.senderId === socket?.id ? (msg.originalText || msg.text) : msg.text}
                                     </div>
                                   </div>
                                 </div>
@@ -23608,27 +28557,33 @@ export default function App() {
                         </div>
                       )}
 
-                    {/* Start Game Button - Shown when consensus reached */}
-                    {consensusReached && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="w-full mt-6 flex flex-col items-center gap-4"
-                      >
+                    {/* Start Game Button - Visible only during Category Selection mode */}
+                    {room.selectionMode === "ready" && (
+                      <div className="w-full mt-2 flex flex-col items-center gap-4">
                         <button
-                          onClick={handleStartGame}
-                          className="w-full py-5 bg-accent-green hover:bg-green-600 text-white rounded-2xl font-black text-2xl shadow-[0_6px_0_0_#15803d] active:shadow-none active:translate-y-1 transition-all flex items-center justify-center gap-3 group"
+                          type="button"
+                          disabled={!consensusReached}
+                          onClick={() => {
+                            if (consensusReached) {
+                              handleStartGame();
+                            }
+                          }}
+                          className={`w-full py-4 text-white rounded-2xl font-black text-2xl transition-all flex items-center justify-center gap-3 group ${
+                            consensusReached
+                              ? "bg-accent-green hover:bg-green-600 shadow-[0_6px_0_0_#15803d] active:shadow-none active:translate-y-1 cursor-pointer"
+                              : "bg-gray-400 border-2 border-gray-500 opacity-70 cursor-not-allowed shadow-none"
+                          }`}
                         >
                           <Play className="w-8 h-8 fill-current group-hover:scale-110 transition-transform" />
                           بدأ اللعب
                         </button>
-                      </motion.div>
+                      </div>
                     )}
                   </div>
                 </div>
 
                 {/* Guess Category Page Static Ad - Outside the box */}
-                <CategoryPageAd />
+                <CategoryPageAd isAdmin={isAdmin} isPro={hasProPackage} />
               </React.Fragment>
             ) : (
               <div className="relative w-full flex flex-col items-center">
@@ -23672,14 +28627,14 @@ export default function App() {
                                   (me?.helpersUsedCount || 0) < 3;
                                 return (
                                   <div className="flex flex-col items-center gap-1 mt-2">
-                                    <span className="text-[13px] text-brown-muted font-bold">
+                                    <span className="text-[13px] text-black font-bold">
                                       اختار اجابة او خمن بنفسك
                                     </span>
                                     <div className="relative w-full">
                                       {/* Blur Overlay */}
                                       {isQuickGuessLocked && (
-                                        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-md rounded-xl border-2 border-dashed border-orange-200">
-                                          <span className="text-[12px] font-bold text-orange-600 text-center px-4 leading-tight drop-shadow-sm">
+                                        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/20 backdrop-blur-md rounded-xl border-2 border-dashed border-orange-200">
+                                          <span className="text-[12px] font-black text-red-600 text-center px-4 leading-tight">
                                             يجب استخدام على الاقل 3 وسائل مساعدة
                                             لفتح اختيارات الإجابات السريعة
                                           </span>
@@ -23804,12 +28759,12 @@ export default function App() {
                       {/* Target Image on the right (User's Left) */}
                       <div className="relative w-full max-w-[9rem] md:max-w-[12rem] aspect-square bg-white p-1.5 rounded-[24px] shadow-[0_8px_20px_rgba(0,0,0,0.15)] overflow-hidden border-2 border-white flex items-center justify-center">
                         <img
-                          src={
+                          src={resolveGameImageUrl(
                             opponent?.targetImage?.url ||
-                            opponent?.targetImage?.image ||
-                            me?.targetImage?.url ||
-                            me?.targetImage?.image
-                          }
+                              opponent?.targetImage?.image ||
+                              me?.targetImage?.url ||
+                              me?.targetImage?.image,
+                          )}
                           className={`w-full h-full object-cover rounded-xl ${funnyFilter === opponent?.id ? "invert sepia hue-rotate-90 scale-110" : ""}`}
                           alt="Target"
                         />
@@ -23874,14 +28829,14 @@ export default function App() {
                                     (me?.helpersUsedCount || 0) < 3;
                                   return (
                                     <div className="flex flex-col items-center gap-1 mt-1">
-                                      <span className="text-[13px] text-brown-muted font-bold">
+                                      <span className="text-[13px] text-black font-bold">
                                         اختار اجابة او خمن بنفسك
                                       </span>
                                       <div className="relative w-full">
                                         {/* Blur Overlay */}
                                         {isQuickGuessLocked && (
-                                          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60 backdrop-blur-md rounded-xl border-2 border-dashed border-orange-200">
-                                            <span className="text-[12px] font-bold text-orange-600 text-center px-4 leading-tight drop-shadow-sm">
+                                          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/20 backdrop-blur-md rounded-xl border-2 border-dashed border-orange-200">
+                                            <span className="text-[12px] font-black text-red-600 text-center px-4 leading-tight">
                                               يجب استخدام على الاقل 3 وسائل
                                               مساعدة لفتح اختيارات الإجابات
                                               السريعة
@@ -23934,7 +28889,7 @@ export default function App() {
                   room.gameState !== "finished" &&
                   room.gameState !== "guessing" && (
                     <>
-                      <div className="w-[75%] md:w-full bg-[#E5DDD5] rounded-2xl border-4 border-white shadow-inner flex flex-col h-50 md:h-64 mt-4 z-20 relative">
+                      <div className="w-[75%] md:w-full bg-[#E5DDD5] rounded-2xl border-4 border-white shadow-inner flex flex-col h-[250px] md:h-[320px] mt-2 z-20 relative overflow-hidden">
                         {isMutedByOpponent && (
                           <div className="absolute inset-0 bg-black/90 backdrop-blur-sm z-30 flex flex-col items-center justify-center text-white">
                             <Lock className="w-12 h-12 mb-2 text-red-400" />
@@ -23943,7 +28898,7 @@ export default function App() {
                             </span>
                           </div>
                         )}
-                        <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat">
+                        <div className="flex-1 min-h-[150px] overflow-y-auto p-3 space-y-2 bg-[url('https://user-images.githubusercontent.com/15075759/28719144-86dc0f70-73b1-11e7-911d-60d70fcded21.png')] bg-repeat">
                           {chatHistory.length === 0 ? (
                             <div className="h-full flex items-center justify-center text-brown-light font-bold text-sm italic">
                               اسأل المنافس وخمن الاجابة...
@@ -23965,7 +28920,7 @@ export default function App() {
                                   <div
                                     className={`leading-tight whitespace-pre-wrap ${msg.senderId === socket?.id ? "text-right" : "text-left"}`}
                                   >
-                                    {msg.text}
+                                    {msg.senderId === socket?.id ? (msg.originalText || msg.text) : msg.text}
                                   </div>
                                 </div>
                               </div>
@@ -23989,7 +28944,6 @@ export default function App() {
                           onSubmit={(e) => {
                             e.preventDefault();
                             if (
-                              room?.matchType === "private" &&
                               customChatInput.trim()
                             ) {
                               playSound("clickOpen");
@@ -24004,9 +28958,9 @@ export default function App() {
                               typingTimeoutRef.current = null;
                             }
                           }}
-                          className="p-1.5 bg-[#F0F0F0] flex gap-2 border-t border-gray-200 relative items-center"
+                          className="p-1.5 py-0.5 bg-[#F0F0F0] flex flex-col gap-1 border-t border-gray-200 relative w-full shrink-0"
                         >
-                          <div className="flex-1 flex gap-2 py-1">
+                          <div className="w-full flex gap-2 items-center">
                             {room?.matchType === "private" ? (
                               <div className="flex-1 flex items-center gap-2">
                                 <button
@@ -24038,6 +28992,23 @@ export default function App() {
                                       1500,
                                     );
                                   }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && !e.shiftKey) {
+                                      e.preventDefault();
+                                      if (customChatInput.trim() && socket && room) {
+                                        playSound("clickOpen");
+                                        socket.emit("send_chat", {
+                                          roomId: room.id,
+                                          text: customChatInput,
+                                        });
+                                        setCustomChatInput("");
+                                        if (typingTimeoutRef.current)
+                                          clearTimeout(typingTimeoutRef.current);
+                                        socket.emit("stop_typing", { roomId: room.id });
+                                        typingTimeoutRef.current = null;
+                                      }
+                                    }
+                                  }}
                                   placeholder="اكتب هنا..."
                                   className="flex-1 bg-white border border-gray-300 rounded-full px-5 py-3 text-sm focus:outline-none focus:border-purple-400 font-bold shadow-inner"
                                 />
@@ -24045,6 +29016,7 @@ export default function App() {
                             ) : (
                               <>
                                 <button
+                                  type="button"
                                   disabled={
                                     isMutedByOpponent ||
                                     isQuickResponseDisabled ||
@@ -24080,12 +29052,13 @@ export default function App() {
                                         }, 3000);
                                     }
                                   }}
-                                  className={`flex-1 py-1 md:py-1.5 px-4 rounded-xl font-black text-[13px] md:text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 border-2 ${clickedResponses.includes("آه") ? "bg-green-500 text-white border-green-600 scale-105" : "bg-white text-green-600 border-green-500 hover:bg-green-50"}`}
+                                  className={`flex-1 py-0.5 md:py-1.5 px-4 rounded-xl font-black text-[13px] md:text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 border-2 ${clickedResponses.includes("آه") ? "bg-green-500 text-white border-green-600 scale-105" : "bg-white text-green-600 border-green-500 hover:bg-green-50"}`}
                                 >
                                   آه
                                 </button>
 
                                 <button
+                                  type="button"
                                   disabled={
                                     isMutedByOpponent ||
                                     isQuickResponseDisabled ||
@@ -24121,45 +29094,122 @@ export default function App() {
                                         }, 3000);
                                     }
                                   }}
-                                  className={`flex-1 py-1 md:py-1.5 px-4 rounded-xl font-black text-[13px] md:text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 border-2 ${clickedResponses.includes("لأ") ? "bg-red-500 text-white border-red-600 scale-105" : "bg-white text-red-600 border-red-500 hover:bg-red-50"}`}
+                                  className={`flex-1 py-0.5 md:py-1.5 px-4 rounded-xl font-black text-[13px] md:text-sm shadow-sm transition-all active:scale-95 disabled:opacity-50 border-2 ${clickedResponses.includes("لأ") ? "bg-red-500 text-white border-red-600 scale-105" : "bg-white text-red-600 border-red-500 hover:bg-red-50"}`}
                                 >
                                   لأ
                                 </button>
                               </>
                             )}
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              playSound("clickOpen");
-                              setShowEmotes(!showEmotes);
-                            }}
-                            className="bg-white text-brown-muted p-2 rounded-full shadow-sm hover:bg-gray-50 active:scale-95 transition-all w-10 h-10 flex items-center justify-center shrink-0"
-                          >
-                            <Smile className="w-5 h-5" />
-                          </button>
-                          {showEmotes && (
-                            <div className="absolute bottom-full left-2 mb-2 bg-white p-2 rounded-2xl shadow-xl border border-gray-200 grid grid-cols-4 gap-1 w-48 z-50">
-                              {EMOTES.map((emote) => (
-                                <button
-                                  key={emote}
-                                  type="button"
-                                  onClick={() => {
-                                    playSound("clickOpen");
-                                    socket?.emit("send_emote", {
-                                      roomId: room!.id,
-                                      emote,
-                                    });
-                                    setShowEmotes(false);
-                                  }}
-                                  className="text-1xl hover:scale-125 transition-transform p-1"
-                                >
-                                  {emote}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </form>
+                          {room?.matchType !== "private" && (
+    <div className="w-full flex items-center gap-1 mt-1 mb-0.5 relative">
+      <button
+        type="submit"
+        disabled={!customChatInput.trim() || !guessChatUnlocked || (opponent?.disableGuessChat === 1 || opponent?.disableGuessChat === true || opponent?.isBot)}
+        className="bg-purple-500 flex items-center justify-center w-9 h-9 md:w-10 md:h-10 text-white rounded-full border-2 border-purple-600 shadow-md active:scale-95 transition-transform disabled:opacity-50 shrink-0 z-10"
+      >
+        <Send className="w-4 h-4 ltr:-scale-x-100" />
+      </button>
+
+      <div className="flex-1 relative">
+        <input
+          type="text"
+          value={customChatInput}
+          disabled={!guessChatUnlocked || (opponent?.disableGuessChat === 1 || opponent?.disableGuessChat === true || opponent?.isBot)}
+          onChange={(e) => {
+            setCustomChatInput(e.target.value);
+            if (!typingTimeoutRef.current) {
+              socket?.emit("typing", { roomId: room!.id });
+            } else {
+              clearTimeout(typingTimeoutRef.current);
+            }
+            typingTimeoutRef.current = setTimeout(() => {
+              socket?.emit("stop_typing", { roomId: room!.id });
+              typingTimeoutRef.current = null;
+            }, 1500);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              if (
+                customChatInput.trim() &&
+                guessChatUnlocked &&
+                !(opponent?.disableGuessChat === 1 || opponent?.disableGuessChat === true || opponent?.isBot)
+              ) {
+                playSound("clickOpen");
+                socket?.emit("send_chat", {
+                  roomId: room!.id,
+                  text: customChatInput,
+                });
+                setCustomChatInput("");
+                if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+                socket?.emit("stop_typing", { roomId: room!.id });
+                typingTimeoutRef.current = null;
+              }
+            }
+          }}
+          placeholder="اكتب رسالتك..."
+          className="w-full bg-white border border-gray-300 rounded-full px-2 md:px-4 py-1 md:py-2 text-sm focus:outline-none focus:border-purple-400 font-bold shadow-inner disabled:bg-gray-100 disabled:text-transparent"
+        />
+        
+        {(!guessChatUnlocked || (opponent?.disableGuessChat === 1 || opponent?.disableGuessChat === true || opponent?.isBot)) && (
+          <div 
+            onClick={() => {
+              if (!guessChatUnlocked) {
+                 handleWatchAdForGuessChat();
+              } else if (opponent?.disableGuessChat === 1 || opponent?.disableGuessChat === true || opponent?.isBot) {
+                 setShowGuessChatLockAlert(true);
+              }
+            }}
+            className="absolute inset-0 z-10 flex items-center justify-center rounded-full cursor-pointer overflow-hidden backdrop-blur-sm bg-white/60 border-2 border-gray-300 transition-all hover:bg-white/40"
+          >
+            <Lock className="w-3 h-3 md:w-4 md:h-4 text-gray-700 ml-1" />
+            <span className="text-[9px] md:text-xs font-black text-gray-800 drop-shadow-md">
+               {(!guessChatUnlocked) 
+                 ? "شاهد اعلان لفتح الشات 📺" 
+                 : "المنافس مانع شات الدردشة"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="relative z-10 shrink-0">
+        <button
+          type="button"
+          onClick={() => {
+            playSound("clickOpen");
+            setShowEmotes(!showEmotes);
+          }}
+          className="bg-white text-brown-muted p-2 rounded-full shadow-sm hover:bg-gray-50 active:scale-95 transition-all w-9 h-9 md:w-10 md:h-10 flex items-center justify-center border-2 border-gray-200"
+        >
+          <Smile className="w-5 h-5" />
+        </button>
+        {showEmotes && (
+          <div className="absolute bottom-full left-0 mb-2 bg-white p-2 rounded-2xl shadow-xl border border-gray-200 grid grid-cols-4 gap-1 w-48 z-50">
+            {EMOTES.map((emote) => (
+              <button
+                key={emote}
+                type="button"
+                onClick={() => {
+                  playSound("clickOpen");
+                  socket?.emit("send_emote", {
+                    roomId: room!.id,
+                    emote,
+                  });
+                  setShowEmotes(false);
+                }}
+                className="text-1xl hover:scale-125 transition-transform p-1"
+              >
+                {emote}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )}
+
+</form>
                       </div>
 
                       {/* Quick Chat Reels */}
@@ -24314,8 +29364,12 @@ export default function App() {
                                     socket?.emit("pass_turn", {
                                       roomId: room!.id,
                                     });
+                                    GameEngineService.handleAction("pass_turn", {
+                                      roomId: room!.id,
+                                      playerId: socket?.id,
+                                    });
                                   }}
-                                  className={`rounded-xl p-0 text-center font-bold text-[13px] md:text-sm shadow-sm transition-all overflow-hidden relative h-10 md:h-12 flex items-center justify-center border-2 ${room.currentTurn === socket?.id ? "bg-white border-orange-300 text-orange-800 hover:bg-orange-50 active:scale-95" : "bg-gray-100 border-gray-200 text-gray-400 opacity-50 cursor-not-allowed"}`}
+                                  className={`rounded-xl p-0 text-center font-bold text-[13px] md:text-sm shadow-sm transition-all overflow-hidden relative h-9 md:h-12 flex items-center justify-center border-2 ${room.currentTurn === socket?.id ? "bg-white border-orange-300 text-orange-800 hover:bg-orange-50 active:scale-95" : "bg-gray-100 border-gray-200 text-gray-400 opacity-50 cursor-not-allowed"}`}
                                 >
                                   تخطي الدور (لا يوجد أسئلة)
                                 </button>
@@ -24327,7 +29381,7 @@ export default function App() {
                                     room.currentTurn === socket?.id;
                                   return (
                                     <button
-                                      key={node ? node.id : `empty-${i}`}
+                                      key={`quick-chat-${i}-${node?.id || "empty"}`}
                                       disabled={
                                         !node ||
                                         isReelsSpinning ||
@@ -24395,9 +29449,7 @@ export default function App() {
                                           </motion.div>
                                         ) : (
                                           <motion.span
-                                            key={
-                                              node ? node.id : `empty-text-${i}`
-                                            }
+                                            key={`quick-chat-text-${i}-${node?.id || "empty"}`}
                                             initial={{ opacity: 0, y: 15 }}
                                             animate={{ opacity: 1, y: 0 }}
                                             transition={{ duration: 0.3 }}
@@ -24434,7 +29486,7 @@ export default function App() {
             >
               <div className="relative w-64 h-64 md:w-80 md:h-80 rounded-[32px] overflow-hidden border-4 border-purple-500 shadow-[0_0_50px_rgba(168,85,247,0.5)]">
                 <img
-                  src={spyLensImage}
+                  src={resolveGameImageUrl(spyLensImage)}
                   className="w-full h-full object-cover blur-md scale-110" // Reduced blur
                   alt="Spy View"
                 />
@@ -24447,9 +29499,9 @@ export default function App() {
         </AnimatePresence>
 
         {/* Help Cards (Bottom Left) - Vertical Stack */}
-        {room.gameState !== "waiting" &&
-          room.gameState !== "custom_image_upload" &&
-          room.gameState !== "starting" && (
+        {(room.gameState === "playing" ||
+          room.gameState === "discussion") &&
+         !room.isPaused && (
             <div className="fixed bottom-20 left-2 md:bottom-6 md:left-6 flex flex-col-reverse gap-2 md:gap-3 z-[200]">
               {[
                 {
@@ -24587,7 +29639,7 @@ export default function App() {
                               "البطارية غير مكتملة",
                             );
                           } else if (!isLocked) {
-                            useCard(card.id as any);
+                            handleUseCard(card.id as any);
                           } else {
                             setActiveTooltip(card.id);
                             setTimeout(() => setActiveTooltip(null), 4000);
@@ -24763,7 +29815,7 @@ export default function App() {
               initial={{ opacity: 0, y: 50 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 50 }}
-              className={`fixed bottom-8 left-1/2 -translate-x-1/2 w-full max-w-[55%] flex items-center justify-center p-6 px-6 py-3 rounded-full font-black shadow-[0_8px_0_rgba(0,0,0,0.2)] z-[999999] flex items-center gap-4 border-4 ${error.includes("انضم") ? "bg-green-500 border-green-400 text-white" : "bg-red-500 border-red-400 text-white"}`}
+              className={`fixed bottom-8 left-1/2 -translate-x-1/2 w-full max-w-md flex text-xs items-center justify-center p-6 px-6 py-3 rounded-full font-black shadow-[0_8px_0_rgba(0,0,0,0.2)] z-[999999] flex items-center gap-4 border-4 ${error.includes("انضم") ? "bg-green-500 border-green-400 text-white" : "bg-red-500 border-red-400 text-white"}`}
             >
               {error}
               <button
@@ -24778,7 +29830,7 @@ export default function App() {
 
         {/* Finished Screen Overlay */}
         <AnimatePresence>
-          {room.gameState === "finished" && (
+          {room.gameState === "finished" && (room.matchType === "random" || room.selectionMode === "ready" || room.selectionMode === "custom") && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -24918,7 +29970,9 @@ export default function App() {
                 >
                   <div className="w-21 h-21 rounded-2xl overflow-hidden shadow-lg">
                     <img
-                      src={me?.targetImage?.url || me?.targetImage?.image}
+                      src={resolveGameImageUrl(
+                        me?.targetImage?.url || me?.targetImage?.image,
+                      )}
                       className="w-full h-full object-cover"
                       alt={me?.targetImage?.name}
                     />
@@ -24953,7 +30007,7 @@ export default function App() {
                             const registrations =
                               await navigator.serviceWorker.getRegistrations();
                             for (let registration of registrations) {
-                              await registration.unregister();
+                              await registration.update();
                             }
                           }
 
@@ -25138,36 +30192,44 @@ export default function App() {
 
         {/* Connection Status Indicator */}
         <AnimatePresence>
-          {(!isConnected || isConnecting || connectionError) && (
+          {showNetworkErrorModal && (
             <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className="fixed bottom-4 left-4 z-[6000] flex items-center gap-3 bg-white/90 backdrop-blur-md p-3 rounded-2xl border-2 border-orange-100 shadow-xl"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[6000] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
             >
-              {isConnecting ? (
-                <div className="w-5 h-5 border-2 border-orange-500 border-t-transparent rounded-full animate-spin"></div>
-              ) : isConnected ? (
-                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
-              ) : (
-                <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-              )}
-              <span className="text-sm font-black text-main">
-                {isConnecting
-                  ? "جاري الاتصال..."
-                  : isConnected
-                    ? "متصل"
-                    : "غير متصل"}
-              </span>
-              {!isConnected && !isConnecting && (
-                <button
-                  onClick={() => connectSocket()}
-                  className="bg-orange-500 text-white text-xs font-black px-3 py-1.5 rounded-lg hover:bg-orange-600 transition-colors flex items-center gap-1"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  إعادة المحاولة
-                </button>
-              )}
+              <motion.div 
+                initial={{ scale: 0.9, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.9, y: 20 }}
+                className="bg-white rounded-3xl p-6 md:p-8 max-w-sm w-full shadow-2xl flex flex-col items-center text-center border-4 border-orange-200"
+              >
+                {isConnecting ? (
+                  <div className="w-16 h-16 border-4 border-orange-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+                ) : (
+                  <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4 text-red-500">
+                    <WifiOff size={32} />
+                  </div>
+                )}
+                <h3 className="text-xl font-black text-gray-800 mb-2">
+                  {isConnecting ? "جاري الاتصال..." : "انقطع الاتصال بالإنترنت!"}
+                </h3>
+                <p className="text-gray-500 text-sm font-bold mb-6 leading-relaxed">
+                  {isConnecting 
+                    ? "يرجى الانتظار، نحاول إعادة الاتصال بالخادم..." 
+                    : "يبدو أن هناك مشكلة في اتصالك بالإنترنت. يرجى التحقق من الشبكة الخاصة بك."}
+                </p>
+                {!isConnected && !isConnecting && (
+                  <button
+                    onClick={() => connectSocket()}
+                    className="w-full bg-orange-500 text-white text-lg font-black px-6 py-4 rounded-2xl hover:bg-orange-600 transition-colors flex items-center justify-center gap-2 shadow-[0_4px_0_0_#c2410c] active:shadow-transparent transform active:translate-y-1"
+                  >
+                    <RefreshCw className="w-5 h-5" />
+                    إعادة المحاولة الآن
+                  </button>
+                )}
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -25231,7 +30293,294 @@ export default function App() {
             />
           )}
         </AnimatePresence>
+
+        <AnimatePresence>
+          {showGuessChatLockAlert && (
+            <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-3xl p-6 max-w-sm w-full text-center border-4 border-red-300 shadow-2xl flex flex-col items-center gap-4 dir-rtl"
+              >
+                <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center border-2 border-red-300">
+                  <Lock className="w-8 h-8 text-red-500" />
+                </div>
+                <h3 className="text-xl font-black text-gray-800">
+                  المنافس مانع شات الدردشة
+                </h3>
+                <p className="text-sm font-bold text-gray-600">
+                  المنافس قام بتفعيل خاصية منع شات الدردشة لهذا اللقاء.
+                </p>
+                <button
+                  onClick={() => setShowGuessChatLockAlert(false)}
+                  className="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-2xl font-black text-base shadow-md active:scale-95 transition-transform"
+                >
+                  حسناً
+                </button>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {reconnectWaitingMessage && (
+          <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[999] p-4 w-full max-w-sm pointer-events-none">
+            <div className="bg-orange-50/95 backdrop-blur-md border border-orange-200 rounded-2xl p-4 shadow-xl flex flex-col gap-3 dir-rtl text-right pointer-events-auto">
+              <div className="flex items-center gap-3 w-full">
+                <Loader2 className="w-5 h-5 text-orange-500 animate-spin flex-shrink-0" />
+                <p className="font-bold text-orange-900 text-sm flex-1">{reconnectWaitingMessage}</p>
+              </div>
+              <button 
+                onClick={() => {
+                   setReconnectWaitingMessage(null);
+                   if (room?.id) {
+                      isIntentionalLeaveRef.current = true;
+                      socket?.emit("intentional_leave", { roomId: room.id });
+                      let forced = false;
+                      const forceTimeout = setTimeout(() => {
+                         forced = true;
+                         resetToHome();
+                      }, 600);
+                      socket?.emit("leave_room", { roomId: room.id }, () => {
+                         if (!forced) {
+                            clearTimeout(forceTimeout);
+                            resetToHome();
+                         }
+                      });
+                   } else {
+                      resetToHome();
+                   }
+                }}
+                className="w-full bg-red-100 hover:bg-red-200 text-red-600 font-bold py-2 rounded-xl text-sm transition-colors border border-red-200 flex items-center justify-center gap-2"
+              >
+                🚪 مغادرة المباراة
+              </button>
+            </div>
+          </div>
+        )}
+
       </div>
     </>
   );
 }
+
+
+const BombPartyControls = ({ room, socket }: { room: any, socket: any }) => {
+  const [bombPartyGuess, setBombPartyGuess] = useState("");
+  const bombInputRef = useRef<HTMLInputElement>(null);
+  const [bombPartyErrorShake, setBombPartyErrorShake] = useState(false);
+  const myPlayerId = room?.players?.[0]?.id || socket?.id;
+
+  useEffect(() => {
+    const onError = () => {
+      setBombPartyErrorShake(true);
+      const audio = new Audio('/sounds/wrong.mp3');
+      audio.play().catch(e => console.log('Audio play failed:', e));
+      setTimeout(() => setBombPartyErrorShake(false), 500);
+    };
+
+    const onExploded = () => {
+      const audio = new Audio('/sounds/pop.mp3');
+      audio.play().catch(e => console.log('Audio play failed:', e));
+    };
+
+    const onCorrect = (data: any) => {
+      setBombPartyGuess("");
+      if (data && (data.playerId === socket?.id || data.playerId === myPlayerId)) {
+        const audio = new Audio('/sounds/correct-answer.mp3');
+        audio.play().catch(e => console.log('Audio play failed:', e));
+      }
+      setTimeout(() => bombInputRef.current?.focus(), 50);
+    };
+
+    socket?.on("bomb_party_error", onError);
+    socket?.on("bomb_exploded", onExploded);
+    socket?.on("bomb_party_correct_guess", onCorrect);
+
+    GameEngineService.on("bomb_party_error", onError);
+    GameEngineService.on("bomb_exploded", onExploded);
+    GameEngineService.on("bomb_party_correct_guess", onCorrect);
+
+    return () => {
+      socket?.off("bomb_party_error", onError);
+      socket?.off("bomb_exploded", onExploded);
+      socket?.off("bomb_party_correct_guess", onCorrect);
+
+      GameEngineService.off("bomb_party_error", onError);
+      GameEngineService.off("bomb_exploded", onExploded);
+      GameEngineService.off("bomb_party_correct_guess", onCorrect);
+    };
+  }, [socket, myPlayerId]);
+
+  useEffect(() => {
+    if (room?.gameState === "bomb_party_playing") {
+      setTimeout(() => bombInputRef.current?.focus(), 50);
+      if (room?.bombParty?.turnPlayerId !== socket?.id && room?.bombParty?.turnPlayerId !== myPlayerId) {
+        setBombPartyGuess("");
+      }
+    }
+  }, [room?.bombParty?.turnPlayerId, room?.gameState, socket?.id, myPlayerId]);
+
+  const isMyTurn = room?.bombParty?.turnPlayerId === socket?.id || room?.bombParty?.turnPlayerId === myPlayerId;
+
+  const submitBombPartyGuess = () => {
+    if (!bombPartyGuess.trim()) return;
+    if (room.bombParty?.explodedPlayerId) return;
+    socket?.emit("bomb_party_guess", { roomId: room?.id, word: bombPartyGuess });
+    GameEngineService.handleAction("bomb_party_guess", { roomId: room?.id, word: bombPartyGuess, playerId: myPlayerId });
+  };
+
+  return (
+    <div className="mt-4 flex flex-col items-center w-full max-w-xs gap-2.5">
+      <input
+        ref={bombInputRef}
+        type="text"
+        value={isMyTurn ? bombPartyGuess : ""}
+        onChange={(e) => {
+          if (isMyTurn) {
+            setBombPartyGuess(e.target.value);
+          }
+        }}
+        onBeforeInput={(e) => {
+          if (!isMyTurn) {
+            e.preventDefault();
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && isMyTurn) submitBombPartyGuess();
+        }}
+        placeholder={isMyTurn ? "خمن الكلمة..." : "انتظر دورك..."}
+        className={`w-full text-center text-lg p-2.5 rounded-xl border-2 outline-none font-bold transition-all
+          ${isMyTurn 
+            ? 'bg-white border-red-500 text-black shadow-[0_0_10px_rgba(239,68,68,0.3)]' 
+            : 'bg-gray-800 border-gray-700 text-gray-500 select-none'}
+        `}
+      />
+      <button
+        onClick={submitBombPartyGuess}
+        disabled={!isMyTurn || !bombPartyGuess.trim() || !!room.bombParty?.explodedPlayerId}
+        className={`w-full py-2.5 rounded-xl font-black text-base text-white transition-all
+          ${isMyTurn 
+            ? bombPartyErrorShake ? 'bg-red-600 animate-shake' : 'bg-red-500 hover:bg-red-600 active:scale-95 shadow-[0_4px_0_0_#991b1b]'
+            : 'bg-gray-700 text-gray-500 cursor-not-allowed'}
+        `}
+      >
+        ارمي القنبلة بسرعة!
+      </button>
+    </div>
+  );
+};
+
+const getCubicBezierPoint = (t: number, p0: {x: number, y: number}, p1: {x: number, y: number}, p2: {x: number, y: number}, p3: {x: number, y: number}) => {
+  const mt = 1 - t;
+  const mt2 = mt * mt;
+  const mt3 = mt2 * mt;
+  const t2 = t * t;
+  const t3 = t2 * t;
+
+  return {
+    x: mt3 * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t3 * p3.x,
+    y: mt3 * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t3 * p3.y,
+  };
+};
+
+const getQuadraticBezierPoint = (t: number, p0: {x: number, y: number}, p1: {x: number, y: number}, p2: {x: number, y: number}) => {
+  const mt = 1 - t;
+  return {
+    x: mt * mt * p0.x + 2 * mt * t * p1.x + t * t * p2.x,
+    y: mt * mt * p0.y + 2 * mt * t * p1.y + t * t * p2.y,
+  };
+};
+
+const getThreeSegmentBezierPoint = (u: number, isLeft: boolean) => {
+  if (u <= 1/3) {
+    const localT = u * 3;
+    const p0 = { x: 200, y: 78 };
+    const p1 = { x: 200, y: 35 };
+    const p2 = isLeft ? { x: 137.8, y: 88.7 } : { x: 262.2, y: 88.7 };
+    return getQuadraticBezierPoint(localT, p0, p1, p2);
+  } else if (u <= 2/3) {
+    const localT = (u - 1/3) * 3;
+    const p0 = isLeft ? { x: 137.8, y: 88.7 } : { x: 262.2, y: 88.7 };
+    const p1 = isLeft ? { x: 106.8, y: 121 } : { x: 293.2, y: 121 };
+    const p2 = isLeft ? { x: 75.8, y: 88.7 } : { x: 324.2, y: 88.7 };
+    return getQuadraticBezierPoint(localT, p0, p1, p2);
+  } else {
+    const localT = Math.min(1.0, (u - 2/3) * 3);
+    const p0 = isLeft ? { x: 75.8, y: 88.7 } : { x: 324.2, y: 88.7 };
+    const p1 = isLeft ? { x: 44.8, y: 56.4 } : { x: 355.2, y: 56.4 };
+    const p2 = isLeft ? { x: 45, y: 35 } : { x: 355, y: 35 };
+    return getQuadraticBezierPoint(localT, p0, p1, p2);
+  }
+};
+
+const getStarburstPath = (cx: number, cy: number, spikes: number, outerRadius: number, innerRadius: number) => {
+  let rot = (Math.PI / 2) * 3;
+  let x = cx;
+  let y = cy;
+  const step = Math.PI / spikes;
+  let path = `M ${cx} ${cy - outerRadius} `;
+
+  for (let i = 0; i < spikes; i++) {
+    x = cx + Math.cos(rot) * outerRadius;
+    y = cy + Math.sin(rot) * outerRadius;
+    path += `L ${x} ${y} `;
+    rot += step;
+
+    x = cx + Math.cos(rot) * innerRadius;
+    y = cy + Math.sin(rot) * innerRadius;
+    path += `L ${x} ${y} `;
+    rot += step;
+  }
+  path += "Z";
+  return path;
+};
+
+const BombTimer = ({ room }: { room: any }) => {
+  const [bombPartyTimeLeft, setBombPartyTimeLeft] = useState(20);
+  
+  useEffect(() => {
+    let interval: any;
+    if (room && room.gameState === "bomb_party_playing" && room.bombParty && !room.bombParty.gameOver) {
+      interval = setInterval(() => {
+        const elapsed = Math.max(0, Date.now() - room.bombParty.bombStartTime);
+        const remaining = Math.max(0, room.bombParty.turnTimeLimit - elapsed);
+        const cappedRemaining = Math.min(room.bombParty.turnTimeLimit, remaining);
+        setBombPartyTimeLeft(cappedRemaining / 1000);
+      }, 50);
+    }
+    return () => clearInterval(interval);
+  }, [room?.gameState, room?.bombParty?.bombStartTime, room?.bombParty?.turnTimeLimit, room?.bombParty?.gameOver]);
+
+  const turnLimitSec = (room.bombParty?.turnTimeLimit || 20000) / 1000;
+  const ratio = Math.max(0, Math.min(1, bombPartyTimeLeft / turnLimitSec));
+  const pulseDuration = 0.2 + 1.3 * ratio; 
+  const pulseScale = 1 + 0.06 * (1 - ratio); 
+
+  return (
+    <React.Fragment>
+      <style>{`
+        @keyframes bomb-pulse-dynamic {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(${pulseScale}); }
+        }
+      `}</style>
+      <div
+        className="w-25 h-25 rounded-full bg-neutral-800 border-4 border-neutral-700 relative flex items-center justify-center z-25"
+        style={{
+          boxShadow: "none",
+          animation: `bomb-pulse-dynamic ${pulseDuration}s ease-in-out infinite`
+        }}
+      >
+        <div className="w-6 h-3 bg-neutral-700 rounded-t-sm absolute -top-3 left-1/2 -translate-x-1/2 border-x-2 border-t-2 border-neutral-600" />
+        
+        <div className="flex flex-col items-center select-none">
+          <span className={`text-4xl font-black ${bombPartyTimeLeft < 3 ? 'text-red-500 animate-pulse' : 'text-amber-500'} tracking-tighter font-mono`}>
+            {Math.ceil(bombPartyTimeLeft)}
+          </span>
+          <span className="text-[9px] font-black text-gray-400 mt-0.5 uppercase tracking-wider">ثانية</span>
+        </div>
+      </div>
+    </React.Fragment>
+  );
+};
