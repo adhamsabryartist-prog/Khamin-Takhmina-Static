@@ -14135,3 +14135,7 @@ if (data.connectFourWordsRewardLevel != null) {
             </motion.div>
           </motion.div>
         )}
+      </AnimatePresence>
+    </>
+  );
+}
