@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Zap, Bomb, Target, WifiOff, Rocket, Sparkles, Gamepad2, Snowflake, ShieldCheck, ShieldAlert, Clock, Box, Swords, ShieldPlus } from "lucide-react";
 import { GameEndControls } from "./components/GameEndControls";
 import { GameEngineService } from "./services/gameEngineService";
+import { getAssetUrl } from "./apiConfig";
 
 const GAME_WIDTH = 400;
 const GAME_HEIGHT = 450;
@@ -497,8 +498,8 @@ export default function SpaceWarGame({ room, socket, playerSerial, isAdmin, play
          rocketRef.current.style.transform = `rotate(${state.frozenRotate}deg)`;
 
          const expectedSrc = state.isFrozen 
-           ? (isPlayer1 ? `/rockets/blue-rocket-snow-lvl-${rocketLevel}.png` : `/rockets/red-rocket-snow-lvl-${rocketLevel}.png`)
-           : (isPlayer1 ? `/rockets/blue-rocket-lvl-${rocketLevel}.gif` : `/rockets/red-rocket-lvl-${rocketLevel}.gif`);
+           ? getAssetUrl(isPlayer1 ? `/rockets/blue-rocket-snow-lvl-${rocketLevel}.png` : `/rockets/red-rocket-snow-lvl-${rocketLevel}.png`)
+           : getAssetUrl(isPlayer1 ? `/rockets/blue-rocket-lvl-${rocketLevel}.gif` : `/rockets/red-rocket-lvl-${rocketLevel}.gif`);
          
          if (rocketRef.current.getAttribute('src') !== expectedSrc) {
            rocketRef.current.setAttribute('src', expectedSrc);
@@ -1033,17 +1034,17 @@ export default function SpaceWarGame({ room, socket, playerSerial, isAdmin, play
 
   const getRocketSrc = () => {
     if (isFrozenState) {
-      if (rocketLevel === 3) return isPlayer1 ? "/rockets/blue-rocket-snow-lvl-3.png" : "/rockets/red-rocket-snow-lvl-3.png";
-      if (rocketLevel === 2) return isPlayer1 ? "/rockets/blue-rocket-snow-lvl-2.png" : "/rockets/red-rocket-snow-lvl-2.png";
-      return isPlayer1 ? "/rockets/blue-rocket-snow-lvl-1.png" : "/rockets/red-rocket-snow-lvl-1.png";
+      if (rocketLevel === 3) return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-snow-lvl-3.png" : "/rockets/red-rocket-snow-lvl-3.png");
+      if (rocketLevel === 2) return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-snow-lvl-2.png" : "/rockets/red-rocket-snow-lvl-2.png");
+      return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-snow-lvl-1.png" : "/rockets/red-rocket-snow-lvl-1.png");
     }
     if (rocketLevel === 3) {
-      return isPlayer1 ? "/rockets/blue-rocket-lvl-3.gif" : "/rockets/red-rocket-lvl-3.gif";
+      return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-lvl-3.gif" : "/rockets/red-rocket-lvl-3.gif");
     }
     if (rocketLevel === 2) {
-      return isPlayer1 ? "/rockets/blue-rocket-lvl-2.gif" : "/rockets/red-rocket-lvl-2.gif";
+      return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-lvl-2.gif" : "/rockets/red-rocket-lvl-2.gif");
     }
-    return isPlayer1 ? "/rockets/blue-rocket-lvl-1.gif" : "/rockets/red-rocket-lvl-1.gif";
+    return getAssetUrl(isPlayer1 ? "/rockets/blue-rocket-lvl-1.gif" : "/rockets/red-rocket-lvl-1.gif");
   };
 
   // Game Finished Screen
@@ -1337,7 +1338,8 @@ export default function SpaceWarGame({ room, socket, playerSerial, isAdmin, play
       {/* Game Play Canvas Wrapper */}
       <div 
         ref={gamePlayContainerRef}
-        className="relative w-full flex-1 bg-[url('/space-bg.jpg')] bg-cover bg-center overflow-hidden min-h-0 select-none"
+        className="relative w-full flex-1 bg-cover bg-center overflow-hidden min-h-0 select-none"
+        style={{ backgroundImage: `url(${getAssetUrl('/space-bg.jpg')})` }}
       >
         {/* Icy Glow Overlay during Time Freeze */}
         {freezeCountdown > 0 && (

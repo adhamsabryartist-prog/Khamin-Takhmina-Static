@@ -26,6 +26,43 @@ export const DEFAULT_CATEGORIES = [
   { id: "people", name: "اشخاص", icon: "👥" },
 ];
 
+export const getBasePrefix = (): string => {
+  if (typeof window !== 'undefined' && window.location) {
+    if (window.location.pathname.startsWith('/Khamin-Takhmina-Static')) {
+      return '/Khamin-Takhmina-Static/';
+    }
+    if (window.location.hostname.includes('github.io')) {
+      const segments = window.location.pathname.split('/').filter(Boolean);
+      if (segments.length > 0) {
+        return `/${segments[0]}/`;
+      }
+    }
+  }
+  const base = import.meta.env.BASE_URL || '/';
+  return base.endsWith('/') ? base : `${base}/`;
+};
+
+export const getAssetUrl = (path: string): string => {
+  if (!path) return '';
+  if (
+    path.startsWith('data:') ||
+    path.startsWith('http://') ||
+    path.startsWith('https://') ||
+    path.startsWith('blob:')
+  ) {
+    return path;
+  }
+  const prefix = getBasePrefix();
+  if (path.startsWith(prefix)) {
+    return path;
+  }
+  if (prefix !== '/' && path.startsWith('/Khamin-Takhmina-Static/')) {
+    return path;
+  }
+  const cleanPath = path.replace(/^\/+/, '');
+  return `${prefix}${cleanPath}`;
+};
+
 export const getApiBaseUrl = (): string => {
   // If running inside AI Studio preview or local development, always use the local container backend
   if (typeof window !== 'undefined' && window.location) {
@@ -58,8 +95,7 @@ export const apiUrl = (path: string): string => {
   // If in Serverless / GitHub Pages mode and requesting an image endpoint:
   // e.g. /api/image/animals/%D8%A3%D8%B1%D9%86%D8%A8 -> /game_images/animals/أرنب.jpg
   if (isServerlessMode()) {
-    const baseUrl = import.meta.env.BASE_URL || '/';
-    const prefix = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+    const prefix = getBasePrefix();
 
     if (cleanPath.startsWith('/api/image/')) {
       const parts = cleanPath.replace('/api/image/', '').split('/');

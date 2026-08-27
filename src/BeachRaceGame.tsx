@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Play, RotateCcw, Award, Volume2, VolumeX, AlertCircle, Info, ArrowLeft, ArrowRight, Zap, CheckCircle2, ShieldAlert, Trophy, Compass, Sparkles, Eraser } from "lucide-react";
 import { GameEndControls } from "./components/GameEndControls";
 import { GameEngineService } from "./services/gameEngineService";
+import { getAssetUrl } from "./apiConfig";
 
 interface BeachRaceGameProps {
   room: any;
@@ -82,8 +83,9 @@ export default function BeachRaceGame({
   // Custom audio player using pooled instances for mobile browser stability
   const customAudioCacheRef = useRef<{ [src: string]: HTMLAudioElement[] }>({});
 
-  const playCustomAudio = (src: string, volume = 1.0) => {
+  const playCustomAudio = (rawSrc: string, volume = 1.0) => {
     try {
+      const src = getAssetUrl(rawSrc);
       if (!customAudioCacheRef.current[src]) {
         customAudioCacheRef.current[src] = [];
       }
@@ -374,62 +376,62 @@ export default function BeachRaceGame({
     // Roads (road1, road2, road3)
     roadImgsRef.current = ["road111-1.svg", "road222-2.svg", "road333-3.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     // Trees (tree1, tree2, tree3, tree4)
     treeImgsRef.current = ["tree11-1.svg", "tree22-2.svg", "tree33-3.svg", "tree44-4.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     // Rocks (rock1, rock2, rock3, rock4)
     rockImgsRef.current = ["rock11-1.svg", "rock22-2.svg", "rock33-3.svg", "rock44-4.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     // Obstacles (obstacle1, obstacle2)
     obstacleImgsRef.current = ["obstacle11-1.svg", "obstacle22-2.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     const rabbitIdle = new Image();
-    rabbitIdle.src = "/beach-environment/rabbit_idle.png";
+    rabbitIdle.src = getAssetUrl("/beach-environment/rabbit_idle.png");
     rabbitIdleImgRef.current = rabbitIdle;
     charImgRef.current = rabbitIdle;
 
     rabbitRunImgsRef.current = ["rabbit_running_01.png", "rabbit_running_02.png", "rabbit_running_03.png", "rabbit_running_04.png"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     // Sea Left Images (sea_l1.svg, sea_l2.svg, sea_l3.svg)
     seaLeftImgsRef.current = ["sea_l1-11.svg", "sea_l2-22.svg", "sea_l3-33.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     // Sea Right Images (sea_r1.svg, sea_r2.svg, sea_r3.svg)
     seaRightImgsRef.current = ["sea_r1-11.svg", "sea_r2-22.svg", "sea_r3-33.svg"].map((f) => {
       const img = new Image();
-      img.src = `/beach-environment/${f}`;
+      img.src = getAssetUrl(`/beach-environment/${f}`);
       return img;
     });
 
     const sea = new Image();
-    sea.src = "/beach-environment/sea-6.svg";
+    sea.src = getAssetUrl("/beach-environment/sea-6.svg");
     seaImgRef.current = sea;
 
     const sky = new Image();
-    sky.src = "/beach-environment/sky1-11.svg";
+    sky.src = getAssetUrl("/beach-environment/sky1-11.svg");
     skyImgRef.current = sky;
   }, []);
 
@@ -1550,7 +1552,7 @@ export default function BeachRaceGame({
         {/* Finished Screen Overlay */}
         {isFinished && (
           <div className="absolute inset-0 bg-black/90 backdrop-blur-xl z-40 flex flex-col items-center justify-center p-6 text-center text-white space-y-6">
-            <img src="/beach-environment/rabbit-end-screen.png" className="w-20 h-20 md:w-25 md:h-25 mb-2 object-contain inline" />
+            <img src={getAssetUrl("/beach-environment/rabbit-end-screen.png")} className="w-20 h-20 md:w-25 md:h-25 mb-2 object-contain inline" />
             <h2 className="text-xl md:text-2xl mb-2 font-black text-amber-300">
               {(() => {
                 const effectiveWinnerId = finishWinnerId !== null ? finishWinnerId : room?.beachRace?.winnerId;
@@ -1608,7 +1610,7 @@ export default function BeachRaceGame({
         {/* Waiting / Lobby Screen */}
         {room?.gameState === "beach_race_setup" && (
           <div className="absolute inset-0 z-50 flex flex-col items-center justify-center p-4 bg-[#4A2C11] backdrop-blur-md shadow-sm w-full h-full text-center rounded-xl">
-            <img src="/beach-environment/rabbit-setup-screen.png" className="w-20 h-20 md:w-25 md:h-25 mb-2 object-contain inline" />
+            <img src={getAssetUrl("/beach-environment/rabbit-setup-screen.png")} className="w-20 h-20 md:w-25 md:h-25 mb-2 object-contain inline" />
             <h2 className="text-2xl md:text-3xl font-black text-amber-600 mb-2 md:mb-4 home-title-stroke-sm">سباق التخمين</h2>
             
             <div className="bg-amber-50 p-4 rounded-xl border border-amber-100 mb-2 w-full text-right shadow-sm max-w-sm">

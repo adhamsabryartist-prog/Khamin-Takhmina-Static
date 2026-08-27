@@ -1,3 +1,5 @@
+import { getAssetUrl } from './apiConfig';
+
 export const STATIC_ASSETS = {
   avatars: {
     1: ['avatar-free-boy-01.png', 'avatar-free-boy-02.png', 'avatar-free-boy-03.png', 'avatar-free-boy-04.png', 'avatar-free-girl-01.png', 'avatar-free-girl-02.png', 'avatar-free-girl-03.png', 'avatar-free-girl-04.png'],
@@ -23,14 +25,14 @@ export const STATIC_ASSETS = {
 };
 
 export const SOUNDS = {
-  HAMMER: '/sounds/hammer.mp3',
-  CLICK_OPEN: '/sounds/click-open.mp3',
-  CLICK_CLOSE: '/sounds/click-close.mp3',
-  CORRECT: '/sounds/correct.mp3',
-  WIN: '/sounds/win.mp3',
-  LOSE: '/sounds/lose.mp3',
-  MESSAGE: '/sounds/message.mp3',
-  COUNTDOWN: '/sounds/countdown.mp3',
-  TICK: '/sounds/tick.mp3',
-  BACKGROUND_MUSIC: '/sounds/background-music.mp3',
+  HAMMER: getAssetUrl('/sounds/hammer.mp3'),
+  CLICK_OPEN: getAssetUrl('/sounds/click-open.mp3'),
+  CLICK_CLOSE: getAssetUrl('/sounds/click-close.mp3'),
+  CORRECT: getAssetUrl('/sounds/correct.mp3'),
+  WIN: getAssetUrl('/sounds/win.mp3'),
+  LOSE: getAssetUrl('/sounds/lose.mp3'),
+  MESSAGE: getAssetUrl('/sounds/message.mp3'),
+  COUNTDOWN: getAssetUrl('/sounds/countdown.mp3'),
+  TICK: getAssetUrl('/sounds/tick.mp3'),
+  BACKGROUND_MUSIC: getAssetUrl('/sounds/background-music.mp3'),
 };

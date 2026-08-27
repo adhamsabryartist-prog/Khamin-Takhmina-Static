@@ -1,5 +1,7 @@
+import './polyfill';
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
+
 import { AvatarProvider } from './contexts/AvatarContext';
 import App from './App.tsx';
 import './index.css';
