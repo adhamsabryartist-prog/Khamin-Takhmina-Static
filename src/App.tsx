@@ -3388,6 +3388,21 @@ export default function App() {
     if (isAdmin && showAdminDashboard && adminTab === "notifications") {
       const fetchPushStats = async () => {
         try {
+          if (isServerlessMode()) {
+            const { getSupabaseClient } = await import("./services/supabaseClient");
+            const supabase = getSupabaseClient();
+            const [playersRes, pushRes] = await Promise.all([
+               supabase.from('players').select('*', { count: 'exact', head: true }),
+               supabase.from('push_subscriptions').select('*', { count: 'exact', head: true })
+            ]);
+            setPushStats({
+              count: pushRes.count || 0,
+              totalPlayers: playersRes.count || 0,
+            });
+            setPushStatsError(null);
+            return;
+          }
+
           const token = localStorage.getItem("khamin_admin_token");
           if (!token) return;
           const response = await fetch(apiUrl(`/api/admin/push-stats?token=${token}`));
@@ -4277,6 +4292,23 @@ export default function App() {
   ]);
   const [onlineCount, setOnlineCount] = useState(0);
   const [totalPlayersCount, setTotalPlayersCount] = useState(0);
+
+  useEffect(() => {
+    if (isServerlessMode()) {
+      import("./services/supabaseClient").then(({ getSupabaseClient }) => {
+        const supabase = getSupabaseClient();
+        const fetchTotal = async () => {
+          try {
+            const { count } = await supabase.from('players').select('*', { count: 'exact', head: true });
+            if (count !== null) setTotalPlayersCount(count);
+          } catch (e) {}
+        };
+        fetchTotal();
+        const interval = setInterval(fetchTotal, 60000);
+        return () => clearInterval(interval);
+      }).catch(e => console.error("Failed to load supabase client", e));
+    }
+  }, []);
 
   const getTextDirection = (text: string): "ltr" | "rtl" => {
     if (!text) return "rtl";
@@ -24117,7 +24149,7 @@ const renderBombPartyRewardBar = () => {
 
                 </div>
 
-              <div className="play-bg border-2 border-black shadow-lg mt-4 p-0.5 md:p-2">
+              <div style={{ backgroundImage: `url(/play-bg-10.jpg)`, backgroundSize: "cover", backgroundPosition: "center" }} className="border-2 border-black shadow-lg mt-4 p-0.5 md:p-2">
                 <div className="p-1 flex flex-wrap relative items-center justify-center">
 
                   <label className="flex flex-col items-center justify-center  h-[70px] md:h-[90px] font-bold mb-2 px-1">
@@ -24175,7 +24207,7 @@ const renderBombPartyRewardBar = () => {
 
                     <div className="absolute inset-0 pointer-events-none flex w-full items-center justify-center text-center z-50">
                       <div className="flex or-bg-2 items-center justify-center text-center text-[10px] md:text-xs uppercase">
-                        <span className="or-bg px-1 text-black font-black">
+                        <span style={{ backgroundImage: `url(/or-bg-2.png)`, backgroundSize: "cover", backgroundPosition: "center" }} className="px-1 text-black font-black">
                           أو
                         </span>
                       </div>
@@ -24985,7 +25017,7 @@ const renderBombPartyRewardBar = () => {
     if (room.handPhase === "picking" || (isSearcher && room.handPhase === "searching")) {
       const isWaitingSearcher = room.handPhase === "picking" && isSearcher;
       return (
-        <div className="w-full flex flex-col hand-bg items-center justify-center p-2 pt-0.5">
+        <div style={{ backgroundImage: `url(/hand-background.jpg)`, backgroundSize: "cover", backgroundPosition: "center" }} className="w-full flex flex-col items-center justify-center p-2 pt-0.5">
           <h2 className="text-sm md:text-base font-black mb-1 text-pink-600 border-2 border-pink-200 bg-pink-50 px-4 py-0.5 rounded-xl shadow-sm text-center">
             {room.handPhase === "picking" 
               ? (isPicker ? `اختار رقم للمنافس يبحث عنه 🧐 (${room.timer || 0}ث)` : `انتظر قليلاً! المنافس يختار رقم... ⏳ (${room.timer || 0}ث)`) 
