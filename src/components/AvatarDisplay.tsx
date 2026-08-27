@@ -1,6 +1,7 @@
 import React from 'react';
 import { Star } from 'lucide-react';
 import { STATIC_ASSETS } from '../constants';
+import { getAssetUrl } from '../apiConfig';
 
 export const AvatarDisplay = React.memo(({ avatar, level, customConfig, className = "w-full h-full", hideExtras = false, isOnline = false, selectedFrame, isHighestLikes = false, isHighestStreak = false }: { avatar: string, level: number, customConfig: any, className?: string, hideExtras?: boolean, isOnline?: boolean, selectedFrame?: string, isHighestLikes?: boolean, isHighestStreak?: boolean }) => {
   const getMilestoneLevel = (lvl: number) => {
@@ -26,18 +27,18 @@ export const AvatarDisplay = React.memo(({ avatar, level, customConfig, classNam
   };
   
   if (avatarMap[avatar]) {
-    avatarReplacement = customConfig.avatars?.[avatarMap[avatar]];
+    avatarReplacement = customConfig?.avatars?.[avatarMap[avatar]];
   }
 
-  const customAvatar = customConfig.avatars?.[milestoneLevel];
-  const customFrame = customConfig.frames?.[milestoneLevel];
-  const customStar = customConfig.stars?.[milestoneLevel];
+  const customAvatar = customConfig?.avatars?.[milestoneLevel];
+  const customFrame = customConfig?.frames?.[milestoneLevel];
+  const customStar = customConfig?.stars?.[milestoneLevel];
 
   const staticAvatar = !customAvatar && STATIC_ASSETS.avatars[milestoneLevel as keyof typeof STATIC_ASSETS.avatars];
   const staticFrame = !customFrame && STATIC_ASSETS.frames[milestoneLevel as keyof typeof STATIC_ASSETS.frames];
   const staticStar = !customStar && STATIC_ASSETS.stars[milestoneLevel as keyof typeof STATIC_ASSETS.stars];
 
-  const isFilename = typeof avatar === 'string' && (avatar.includes('.png') || avatar.includes('.webp') || avatar.includes('.jpg') || avatar.includes('.jpeg'));
+  const isFilename = typeof avatar === 'string' && (avatar.includes('.png') || avatar.includes('.webp') || avatar.includes('.jpg') || avatar.includes('.jpeg') || avatar.includes('.svg') || avatar.includes('.gif'));
   const isDataUrl = typeof avatar === 'string' && avatar.startsWith('data:image');
   
   const appVersion = customConfig?.version || "1.0";
@@ -47,20 +48,20 @@ export const AvatarDisplay = React.memo(({ avatar, level, customConfig, classNam
   };
 
   let baseAvatar = isDataUrl ? avatar :
-                     (avatarReplacement ? `/uploads/${avatarReplacement}` :
-                     (isFilename ? (avatar.startsWith('/') ? avatar : `/assets/${avatar}`) : 
-                     (customAvatar ? `/uploads/${customAvatar}` :
-                     (staticAvatar ? `/assets/${Array.isArray(staticAvatar) ? staticAvatar[0] : staticAvatar}` : 
+                     (avatarReplacement ? getAssetUrl(`/uploads/${avatarReplacement}`) :
+                     (isFilename ? (avatar.startsWith('/') || avatar.startsWith('http') ? getAssetUrl(avatar) : getAssetUrl(`/assets/${avatar}`)) : 
+                     (customAvatar ? getAssetUrl(`/uploads/${customAvatar}`) :
+                     (staticAvatar ? getAssetUrl(`/assets/${Array.isArray(staticAvatar) ? staticAvatar[0] : staticAvatar}`) : 
                      avatar))));
   const displayAvatar = typeof baseAvatar === 'string' && !baseAvatar.startsWith('data:') && (baseAvatar.includes('/') || baseAvatar.includes('.png') || baseAvatar.includes('.webp') || baseAvatar.includes('.jpg') || baseAvatar.includes('.jpeg')) ? appendV(baseAvatar) as string : baseAvatar;
 
-  let displayFrame = !hideExtras && (customFrame ? `/uploads/${customFrame}` : (staticFrame ? `/assets/${staticFrame}` : null));
+  let displayFrame = !hideExtras && (customFrame ? getAssetUrl(`/uploads/${customFrame}`) : (staticFrame ? getAssetUrl(`/assets/${staticFrame}`) : null));
   if (selectedFrame && !hideExtras) {
-    displayFrame = `/assets/${selectedFrame}`;
+    displayFrame = selectedFrame.startsWith('/') || selectedFrame.startsWith('http') ? getAssetUrl(selectedFrame) : getAssetUrl(`/assets/${selectedFrame}`);
   }
   displayFrame = appendV(displayFrame) as string | null;
   
-  let displayStar = !hideExtras && (customStar ? `/uploads/${customStar}` : (staticStar ? `/assets/${staticStar}` : null));
+  let displayStar = !hideExtras && (customStar ? getAssetUrl(`/uploads/${customStar}`) : (staticStar ? getAssetUrl(`/assets/${staticStar}`) : null));
   displayStar = appendV(displayStar) as string | null;
 
   const getAvatarStyle = (lvl: number) => {
@@ -116,7 +117,7 @@ export const AvatarDisplay = React.memo(({ avatar, level, customConfig, classNam
       {/* Highest Streak Fire Frame GIF Background */}
       {isHighestStreak && (
         <img 
-          src="/fire_frame_Higher_Streak_Number_Animation_02.gif"
+          src={getAssetUrl("/fire_frame_Higher_Streak_Number_Animation_02.gif")}
           className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[160%] h-[160%] max-w-none object-contain pointer-events-none z-0 opacity-90"
           alt="Highest Streak Fire"
         />
@@ -135,7 +136,7 @@ export const AvatarDisplay = React.memo(({ avatar, level, customConfig, classNam
         z-10
         ${displayFrame ? 'p-1.5' : `border-4 ${getAvatarStyle(level)}`}
       `}>
-        {displayAvatar.startsWith('data:image') || displayAvatar.startsWith('http') || displayAvatar.startsWith('/uploads/') || displayAvatar.startsWith('/assets/') ? (
+        {typeof displayAvatar === 'string' && (displayAvatar.startsWith('data:image') || displayAvatar.startsWith('http') || displayAvatar.includes('/uploads/') || displayAvatar.includes('/assets/') || displayAvatar.includes('.png') || displayAvatar.includes('.webp') || displayAvatar.includes('.jpg') || displayAvatar.includes('.jpeg')) ? (
           <img src={displayAvatar} crossOrigin="anonymous" className="w-full h-full object-cover rounded-full" alt="Avatar" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-inherit font-black">{displayAvatar}</div>
