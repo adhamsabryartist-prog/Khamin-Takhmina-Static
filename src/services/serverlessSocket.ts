@@ -420,7 +420,7 @@ export class ServerlessSocket {
         );
 
         // Update Client
-        this.triggerLocalEvent("match_found", { room, roomId: room.id });
+        this.triggerLocalEvent("random_match_found", { room, roomId: room.id });
         this.triggerLocalEvent("room_update", room);
         if (callback) callback({ success: true, room });
         break;
