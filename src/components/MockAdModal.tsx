@@ -1,3 +1,4 @@
+import { getAssetUrl } from "../apiConfig";
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X } from 'lucide-react';
@@ -82,7 +83,7 @@ export const MockAdModal: React.FC<MockAdModalProps> = ({ imageUrl, targetUrl, o
             />
           ) : (
             <div className="w-full h-full bg-slate-900 flex items-center justify-center">
-               <img src="/logo.png" className="w-32 h-32 opacity-20" alt="logo" />
+               <img src={getAssetUrl("/logo.png")} className="w-32 h-32 opacity-20" alt="logo" />
             </div>
           )}
           
