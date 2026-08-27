@@ -6,17 +6,18 @@
 import { getSupabaseClient } from "./supabaseClient";
 import { GameEngineService } from "./gameEngineService";
 import { MatchmakingService, MatchFoundResult } from "./matchmakingService";
+import { getAssetUrl } from "../apiConfig";
 
 export const DEFAULT_SHOP_ITEMS = [
-  { id: "frame_lvl_10", name: "إطار المستوى 10", type: "frame", price: 100, image: "/assets/frame-lvl-10.png" },
-  { id: "frame_lvl_20", name: "إطار المستوى 20", type: "frame", price: 250, image: "/assets/frame-lvl-20.png" },
-  { id: "frame_lvl_30", name: "إطار المستوى 30", type: "frame", price: 500, image: "/assets/frame-lvl-30.png" },
-  { id: "frame_lvl_40", name: "إطار المستوى 40", type: "frame", price: 1000, image: "/assets/frame-lvl-40.png" },
-  { id: "frame_lvl_50", name: "إطار المستوى 50", type: "frame", price: 2000, image: "/assets/frame-lvl-50.png" },
-  { id: "animals_frame", name: "إطار فئة الحيوانات", type: "frame", price: 300, image: "/assets/animals-category-frame-gift.png" },
-  { id: "food_frame", name: "إطار فئة الأكلات", type: "frame", price: 300, image: "/assets/food-category-frame-gift.png" },
-  { id: "plants_frame", name: "إطار فئة النباتات", type: "frame", price: 300, image: "/assets/plants-category-frame-gift.png" },
-  { id: "objects_frame", name: "إطار فئة الجماد", type: "frame", price: 300, image: "/assets/objects-category-frame-gift.png" }
+  { id: "frame_lvl_10", name: "إطار المستوى 10", type: "frame", price: 100, image: getAssetUrl("/assets/frame-lvl-10.png") },
+  { id: "frame_lvl_20", name: "إطار المستوى 20", type: "frame", price: 250, image: getAssetUrl("/assets/frame-lvl-20.png") },
+  { id: "frame_lvl_30", name: "إطار المستوى 30", type: "frame", price: 500, image: getAssetUrl("/assets/frame-lvl-30.png") },
+  { id: "frame_lvl_40", name: "إطار المستوى 40", type: "frame", price: 1000, image: getAssetUrl("/assets/frame-lvl-40.png") },
+  { id: "frame_lvl_50", name: "إطار المستوى 50", type: "frame", price: 2000, image: getAssetUrl("/assets/frame-lvl-50.png") },
+  { id: "animals_frame", name: "إطار فئة الحيوانات", type: "frame", price: 300, image: getAssetUrl("/assets/animals-category-frame-gift.png") },
+  { id: "food_frame", name: "إطار فئة الأكلات", type: "frame", price: 300, image: getAssetUrl("/assets/food-category-frame-gift.png") },
+  { id: "plants_frame", name: "إطار فئة النباتات", type: "frame", price: 300, image: getAssetUrl("/assets/plants-category-frame-gift.png") },
+  { id: "objects_frame", name: "إطار فئة الجماد", type: "frame", price: 300, image: getAssetUrl("/assets/objects-category-frame-gift.png") }
 ];
 
 export type EventListener = (...args: any[]) => void;
@@ -141,7 +142,7 @@ export class ServerlessSocket {
       case "register_player": {
         try {
           const name = (payload?.name || "").trim() || "لاعب تخمينة";
-          const avatar = payload?.avatar || "/assets/avatar-free-boy-01.png";
+          const avatar = payload?.avatar || getAssetUrl("/assets/avatar-free-boy-01.png");
           const gender = payload?.gender || "boy";
           const selectedFrame = payload?.selectedFrame || "";
           const fingerprint = payload?.fingerprint || "";
@@ -220,7 +221,7 @@ export class ServerlessSocket {
         let playerData: any = {
           serial,
           name: localStorage.getItem("khamin_player_name") || "لاعب تخمينة",
-          avatar: localStorage.getItem("khamin_player_avatar") || "/assets/avatar-free-boy-01.png",
+          avatar: localStorage.getItem("khamin_player_avatar") || getAssetUrl("/assets/avatar-free-boy-01.png"),
           gender: localStorage.getItem("khamin_player_gender") || "boy",
           selectedFrame: localStorage.getItem("khamin_player_frame") || "",
           xp: parseInt(localStorage.getItem("khamin_xp") || "0", 10),
@@ -375,7 +376,7 @@ export class ServerlessSocket {
         this.isSearchingMatch = true;
         const mySerial = payload?.serial || localStorage.getItem("khamin_player_serial") || "P1";
         const myName = payload?.name || localStorage.getItem("khamin_player_name") || "أنا";
-        const myAvatar = payload?.avatar || localStorage.getItem("khamin_player_avatar") || "/assets/avatar-free-boy-01.png";
+        const myAvatar = payload?.avatar || localStorage.getItem("khamin_player_avatar") || getAssetUrl("/assets/avatar-free-boy-01.png");
         const myLevel = parseInt(localStorage.getItem("khamin_xp") || "0", 10) / 100 + 1;
         const gameType = payload?.gameType || "selection";
 

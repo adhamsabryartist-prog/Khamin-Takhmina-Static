@@ -1,3 +1,4 @@
+import { getAssetUrl } from "../apiConfig";
 // =========================================================
 // Serverless Matchmaking & Signaling Service (Supabase + P2P)
 // =========================================================
@@ -548,7 +549,7 @@ export class MatchmakingService {
                 opponent: {
                   id: updatedRecord.matched_with_id,
                   name: "منافس متصل",
-                  avatar: "/assets/avatar-free-boy-01.png",
+                  avatar: getAssetUrl("/assets/avatar-free-boy-01.png"),
                   level: player.level,
                 },
               });
